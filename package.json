@@ -1,0 +1,12 @@
+{
+  "name": "star-castle-2",
+  "version": "0.1.0",
+  "description": "A vector-style browser game inspired by classic arcade shooters",
+  "main": "game.js",
+  "scripts": {
+    "test": "node test-smoke.js",
+    "check": "node --check game.js"
+  },
+  "keywords": ["game", "browser", "canvas", "vector"],
+  "license": "MIT"
+}

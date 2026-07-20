@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Star Castle 2</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+
+  <div id="attractScreen">
+    <div id="attractContent">
+      <h1>STAR CASTLE 2</h1>
+      <p id="attractPrompt">PRESS START OR TAP TO PLAY</p>
+      <p id="attractSub">Arrow keys / WASD to move &bull; Space to fire &bull; M to mute</p>
+    </div>
+  </div>
+
+  <div id="hud">
+    <div id="muteBtn" class="hud-btn" title="Mute/Unmute">MUTE</div>
+  </div>
+
+  <div id="touchControls">
+    <div id="touchLeft" class="touch-btn">LEFT</div>
+    <div id="touchThrust" class="touch-btn">THRUST</div>
+    <div id="touchRight" class="touch-btn">RIGHT</div>
+    <div id="touchFire" class="touch-btn">FIRE</div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
