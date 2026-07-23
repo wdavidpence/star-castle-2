@@ -4,19 +4,33 @@
   box-sizing: border-box;
 }
 
+:root {
+  --safe-top: env(safe-area-inset-top);
+  --safe-right: env(safe-area-inset-right);
+  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-left: env(safe-area-inset-left);
+}
+
 html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
   background: #000;
   font-family: 'Courier New', Courier, monospace;
+  /* Prevent iOS bounce-scroll and zoom */
+  touch-action: none;
+  -webkit-overflow-scrolling: none;
+  overscroll-behavior: none;
 }
 
 #gameCanvas {
   display: block;
+  position: fixed;
+  inset: 0;
   width: 100%;
   height: 100%;
   background: #000;
+  touch-action: none;
 }
 
 #attractScreen {
@@ -25,8 +39,13 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #000;
+  background: transparent;
   z-index: 10;
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  /* Make entire screen tappable */
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
 }
 
 #attractScreen.hidden {
@@ -34,20 +53,14 @@ html, body {
 }
 
 #attractContent {
-  text-align: center;
-  color: #0f0;
-}
-
-#attractContent h1 {
-  font-size: clamp(2rem, 8vw, 5rem);
-  letter-spacing: 0.3em;
-  text-shadow: 0 0 10px #0f0, 0 0 30px #0a0;
-  margin-bottom: 2rem;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 #attractPrompt {
-  font-size: clamp(0.8rem, 3vw, 1.4rem);
+  font-size: clamp(0.9rem, 3.5vw, 1.4rem);
   animation: blink 1.2s step-end infinite;
+  text-shadow: 0 0 8px #fff;
 }
 
 @keyframes blink {
@@ -56,14 +69,40 @@ html, body {
 
 #attractSub {
   margin-top: 1.5rem;
-  font-size: clamp(0.5rem, 2vw, 0.9rem);
+  font-size: clamp(0.55rem, 2.2vw, 0.9rem);
   color: #0a0;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  padding: 0 0.5rem;
+}
+
+#deadOverlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  z-index: 10;
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+
+#deadOverlay.hidden {
+  display: none;
+}
+
+#deadContent {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 #hud {
   position: fixed;
-  top: 0;
-  right: 0;
+  top: var(--safe-top);
+  right: var(--safe-right);
   z-index: 5;
   padding: 0.5rem;
   display: none;
@@ -77,11 +116,18 @@ html, body {
   background: rgba(0, 255, 0, 0.1);
   border: 1px solid #0f0;
   color: #0f0;
-  padding: 0.4rem 0.8rem;
+  padding: 0.5rem 0.8rem;
   font-family: inherit;
-  font-size: 0.8rem;
+  font-size: clamp(0.7rem, 2.5vw, 0.9rem);
   cursor: pointer;
   user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
 }
 
 .hud-btn:active, .hud-btn.active {
@@ -90,15 +136,16 @@ html, body {
 
 #touchControls {
   position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  bottom: var(--safe-bottom);
+  left: var(--safe-left);
+  right: var(--safe-right);
   z-index: 5;
   display: none;
   grid-template-columns: 1fr 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  gap: 4px;
-  padding: 4px;
+  gap: 6px;
+  padding: 6px;
+  touch-action: none;
 }
 
 #touchControls.visible {
@@ -110,12 +157,18 @@ html, body {
   border: 1px solid rgba(0, 255, 0, 0.4);
   color: #0f0;
   font-family: inherit;
-  font-size: clamp(0.6rem, 2.5vw, 0.9rem);
+  font-size: clamp(0.75rem, 2.8vw, 1rem);
   text-align: center;
-  padding: 1rem 0;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  /* Larger hit area for fat fingers */
+  padding: 0.6rem 0.4rem;
 }
 
 .touch-btn:active, .touch-btn.active {
@@ -128,8 +181,30 @@ html, body {
 #touchRight { grid-column: 3; grid-row: 1; }
 #touchFire { grid-column: 1 / -1; grid-row: 2; }
 
+/* On desktop devices with mouse, hide touch controls */
 @media (hover: hover) and (pointer: fine) {
   #touchControls {
     display: none !important;
+  }
+  .hud-btn {
+    min-width: auto;
+    min-height: auto;
+  }
+}
+
+/* Portrait-specific: taller touch buttons for narrow screens */
+@media (max-width: 420px) and (orientation: portrait) {
+  #touchControls {
+    grid-template-rows: 1fr 1.2fr;
+    gap: 8px;
+    padding: 8px;
+  }
+  .touch-btn {
+    min-height: 56px;
+    font-size: clamp(0.8rem, 3.2vw, 1.1rem);
+  }
+  #hud {
+    top: calc(var(--safe-top) + 4px);
+    right: calc(var(--safe-right) + 4px);
   }
 }

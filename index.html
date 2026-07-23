@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>Star Castle 2</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -15,6 +17,10 @@
       <p id="attractPrompt">PRESS START OR TAP TO PLAY</p>
       <p id="attractSub">Arrow keys / WASD to move &bull; Space to fire &bull; M to mute</p>
     </div>
+  </div>
+
+  <div id="deadOverlay">
+    <div id="deadContent"></div>
   </div>
 
   <div id="hud">

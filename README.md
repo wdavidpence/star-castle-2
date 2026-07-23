@@ -1,12 +1,18 @@
 # Star Castle 2
 
-> **Phase 1 — Browser Foundation**
+A vector-style browser recreation of the 1980 Cinematronics Star Castle arcade game.
 
-A vector-style browser game inspired by classic arcade shooters. Currently implementing the foundational infrastructure.
+## Features
 
-## Current Status
-
-**Full Star Castle gameplay is not yet implemented.** This repository contains only the Phase 1 browser foundation: canvas rendering loop, input handling, and UI scaffolding. No enemies, scoring, levels, or vector graphics gameplay exist at this time.
+- **Vector arcade rendering**: Pure wireframe graphics with green phosphor glow, no filled elements
+- **Central cannon**: Castle-shaped core that tracks and fires through shield gaps
+- **Shield rings**: 3 rotating arc-based shield rings with outer-to-inner breach mechanics
+- **Ring regeneration**: Destroyed outer rings trigger animated ring shift and new inner ring spawn
+- **Enemy types**: Mines, chasers, fast ships, and tanks with distinct behaviors
+- **Continuous gameplay**: Enemies spawn continuously; destroy the core to advance levels
+- **Difficulty scaling**: Deterministic per-level scaling with hard caps (cannon speed, fire rate, turn rate, enemy speed)
+- **Audio**: Web Audio API sound effects with distinct waveforms per event type
+- **Mobile support**: Touch controls, safe-area insets, portrait-mode playable
 
 ## Running Locally
 
@@ -30,39 +36,49 @@ Then navigate to the served URL (e.g. `http://localhost:3000` or `http://localho
 
 | Action | Key(s) |
 |---|---|
-| Move left | `ArrowLeft` / `A` |
-| Move right | `ArrowRight` / `D` |
+| Rotate left | `ArrowLeft` / `A` |
+| Rotate right | `ArrowRight` / `D` |
 | Thrust | `ArrowUp` / `W` |
-| Fire | `Space` / `ArrowDown` / `S` |
+| Fire | `Space` / `F` |
 | Mute/Unmute | `M` |
-| Start game | `Space` / `Enter` |
+| Start/Restart | `Space` / `Enter` |
 
 ### Touch
 
-On-screen buttons for LEFT, THRUST, RIGHT, and FIRE. Tap the attract screen or FIRE to start.
+On-screen buttons for LEFT, THRUST, RIGHT, and FIRE. Tap the screen to start/restart.
 
 ### Mute
 
 Press `M` or tap the MUTE button in the HUD to toggle sound on/off.
 
+## Gameplay
+
+Destroy enemy ships attacking from the screen edges. Destroy the central cannon core to clear each level. Green shield rings rotate around your ship — enemy projectiles must pass through shield gaps to reach you. When an outer shield ring is destroyed, inner rings shift outward and a new ring spawns at the core with a smooth animation.
+
 ## Smoke Tests
 
-Verify the foundation is intact:
+Verify the implementation is intact:
 
 ```
 npm test
 ```
 
-Runs `test-smoke.js`, which asserts that required DOM elements exist in `index.html` and that core functions (`startGame`, `toggleMute`, `initInput`, `drawAttract`, `drawGame`, `loop`, `init`) are defined in `game.js`.
+Runs `test-smoke.js`, which validates DOM structure, source code contracts, deterministic math simulations (shield collision, ring regen, movement physics, attract card rotation, difficulty scaling, death sequence, enemy spawning), and rendering conventions.
+
+```
+npm run check
+```
+
+Validates JavaScript syntax.
 
 ## Project Files
 
 | File | Purpose |
 |---|---|
 | `index.html` | Entry point; canvas, attract screen, HUD, touch controls |
-| `game.js` | Game loop, input handling, drawing, state management |
-| `style.css` | Full-screen canvas, attract screen, HUD, touch button layout |
-| `test-smoke.js` | Smoke test suite |
+| `game.js` | Single-file game: loop, input, physics, collision, rendering, audio, state machine |
+| `style.css` | Full-screen canvas, attract screen, HUD, touch button layout, safe-area support |
+| `test-smoke.js` | Smoke test suite with deterministic simulations |
 | `package.json` | Project metadata and npm scripts |
 
 ## License
