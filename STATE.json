@@ -1,0 +1,52 @@
+{
+  "project": "star-castle-2",
+  "target_description": "A vector-style browser recreation of the 1980 Cinematronics Star Castle arcade game with shield rings, enemy types, Web Audio API sound effects, and mobile touch controls.",
+  "overall_score": 0,
+  "last_test_report": {},
+  "next_action": "initial_setup_complete_waiting_for_first_loop_pass",
+  "pass_count": 0,
+  "judge_review_due": false,
+  "last_commit": "",
+  "checklist": [
+    { "item": "runtime_load", "score": 0, "notes": "" },
+    { "item": "core_gameplay", "score": 0, "notes": "" },
+    { "item": "shield_rings", "score": 0, "notes": "" },
+    { "item": "controls", "score": 0, "notes": "" },
+    { "item": "enemies", "score": 0, "notes": "" },
+    { "item": "transitions_scoring", "score": 0, "notes": "" },
+    { "item": "vector_presentation", "score": 0, "notes": "" },
+    { "item": "audio", "score": 0, "notes": "" },
+    { "item": "mobile", "score": 0, "notes": "" },
+    { "item": "stability", "score": 0, "notes": "" },
+    { "item": "documentation", "score": 0, "notes": "" }
+  ],
+  "_metadata": {
+    "last_updated": "2026-07-25T00:00:00.000Z",
+    "idle_minutes_threshold": 20,
+    "batch_size": 8,
+    "current_batch_passes": 0,
+    "state_inspector": {
+      "game_state": "",
+      "player_position": null,
+      "shield_ring_count": 0,
+      "enemy_count": 0,
+      "cannon_shots": 0,
+      "high_score": 0,
+      "lives": 3,
+      "frame_count_high": 0
+    },
+    "gate_results": {
+      "npm_test_pass": false,
+      "npm_check_pass": false,
+      "git_diff_clean": true,
+      "scorecard_pass": false,
+      "last_gate_exit_codes": {}
+    },
+    "scorecard_last_report_path": "",
+    "last_scorecard_exit": -1,
+    "hooks": {
+      "judge_decision_path": null,
+      "scorecard_report_backup": false
+    }
+  }
+}
