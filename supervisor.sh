@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
-# supervisor.sh — autonomous game-quality-supervisor for star-castle-2.
-# POSIX-compatible Bash 3.2, no embedded multi-line Node, no fragile quoting.
+# supervisor.sh -- autonomous game-quality-supervisor for star-castle-2.
+# Bash 3.2 (macOS default), no embedded multi-line Node, schema-preserving
+# atomic state updates, background worker with PID tracking and idle restart.
 
 set -u
 
-# --- Resolve ROOT (no absolute paths in tool commands) ------------------
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 STATE_PATH="${ROOT}/STATE.json"
 JUDGE_FILE="${ROOT}/judge_decision.json"
 LOCK_FILE="${ROOT}/supervisor.lock"
 LOG_DIR="${ROOT}/.opencode"
 LOG_FILE="${LOG_DIR}/supervisor.log"
 
-# --- Defaults (overridable via env) ------------------------------------
 BATCH_SIZE="${BATCH_SIZE:-8}"
 IDLE_MINUTES="${IDLE_MINUTES:-20}"
 
-# --- Argument parsing --------------------------------------------------
 RUN_ONCE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,15 +23,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- Logging (append-only, no credentials) -----------------------------
 mkdir -p "${LOG_DIR}"
 
-log() {
-  local ts
-  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
-  printf '[%s] %s\n' "${ts}" "$*" | tee -a "${LOG_FILE}" >&2
-}
+utc_ts() { date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date; }
 
+log() { printf '[%s] %s\n' "$(utc_ts)" "$*" | tee -a "${LOG_FILE}" >&2; }
 die() { log "FATAL: $*"; exit 1; }
 
 # --- Lock helpers (trap-safe) ------------------------------------------
@@ -43,10 +36,10 @@ acquire_lock() {
     local lock_pid
     lock_pid=$(cat "${LOCK_FILE}" 2>/dev/null || echo "")
     if [[ -n "${lock_pid}" ]] && kill -0 "${lock_pid}" 2>/dev/null; then
-      log "Lock held by PID ${lock_pid}; skipping this iteration."
+      log "Lock held by PID ${lock_pid}; another supervisor is running."
       return 1
     fi
-    log "Removing stale lock file." && rm -f "${LOCK_FILE}"
+    log "Removing stale lock file (PID ${lock_pid} not alive)." && rm -f "${LOCK_FILE}"
   fi
   printf '%s\n' "$$" > "${LOCK_FILE}"
   return 0
@@ -54,237 +47,257 @@ acquire_lock() {
 
 release_lock() { rm -f "${LOCK_FILE}"; }
 
-# Cleanup lock on exit / interrupt.
 trap 'release_lock; exit 130' INT TERM
 trap 'release_lock' EXIT
 
-# Sanity: STATE.json must exist.
 [[ -f "${STATE_PATH}" ]] || die "STATE.json missing at ${STATE_PATH}."
 
-# --- Atomic state updaters (node -e one-liner, double-quoted arg) ------
-# The outer shell uses "..." so $VAR expands; the JS inside uses '...'
-update_state() {
-  local pass_count="$1" next_action="$2" extra_json
+# --- Atomic state helpers (schema-preserving) --------------------------
+# These read existing STATE.json, modify only what is needed, and write
+# atomically via rename so no top-level keys are ever destroyed.
 
-  extra_json="${3:-}"
-
-  node -e "
-    var fs=require('fs'), p='${STATE_PATH}', s={};
-    try { s=JSON.parse(fs.readFileSync(p,'utf8')); } catch(e) {}
-    s.pass_count = ${pass_count:-0};
-    s.next_action = '${next_action}';
-    s.last_pass_time = (new Date()).toISOString();
-    ${extra_json}
-    var tmp=p+'.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(s,null,2));
-    try { fs.renameSync(tmp,p); } catch(e){}
-  " 2>>"${LOG_FILE}" || true
+mark_worker_running() {
+  # Atomically: increment pass_count (from existing numeric value) and set
+  # next_action="worker_running". Also stamps _metadata.last_updated.
+  node -e '
+    (function(){
+      var fs=require("fs"), p=process.argv[1];
+      try { var s=JSON.parse(fs.readFileSync(p,"utf8")); } catch(e) { s={}; }
+      if (typeof s.pass_count !== "number") s.pass_count = 0;
+      s.pass_count += 1;
+      s.next_action = "worker_running";
+      s.last_pass_time = (new Date()).toISOString();
+      if (!s._metadata) s._metadata = {};
+      s._metadata.last_updated = (new Date()).toISOString();
+      var tmp=p+".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(s,null,2));
+      try { fs.renameSync(tmp,p); } catch(e){}
+    })("'${STATE_PATH}'")' 2>>"${LOG_FILE}" || true
 }
 
-# Atomically set judge_review_due (or clear it).
+store_gate_exit_codes() {
+  # Store real gate exit codes in _metadata.gate_results and last_test_report.
+  # Does NOT touch checklist, overall_score, pass_count, or any other top-level key.
+  local sc="$1" test_ec="$2" check_ec="$3" diff_ec="$4"
+  node -e '
+    (function(){
+      var fs=require("fs"), p=process.argv[1], s={};
+      try { s=JSON.parse(fs.readFileSync(p,"utf8")); } catch(e) { s={}; }
+      if (!s._metadata) s._metadata = {};
+      s._metadata.gate_results = {
+        npm_test_pass:     ("'${test_ec}'" === "0"),
+        npm_check_pass:    ("'${check_ec}'" === "0"),
+        git_diff_clean:    ("'${diff_ec}'"  === "0"),
+        scorecard_pass:    ("'${sc}'"       === "0"),
+        last_gate_exit_codes: { scorecard: parseInt("'${sc}'",10), test: parseInt("'${test_ec}'",10), check: parseInt("'${check_ec}'",10), diff: parseInt("'${diff_ec}'",10) }
+      };
+      s.last_test_report = { updated_at: (new Date()).toISOString(), gate_exits: s._metadata.gate_results.last_gate_exit_codes };
+      var tmp=p+".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(s,null,2));
+      try { fs.renameSync(tmp,p); } catch(e){}
+    })("'${STATE_PATH}'")' 2>>"${LOG_FILE}" || true
+}
+
 set_judge_flag() {
-  local val="$1"   # true | false | "" (delete)
-  if [[ "${val}" == "false" || -z "${val}" ]]; then
-    node -e "
-      var fs=require('fs'), p='${STATE_PATH}', s={};
-      try { s=JSON.parse(fs.readFileSync(p,'utf8')); } catch(e) {}
-      delete s.judge_review_due;
-      var tmp=p+'.tmp';
+  # Set or clear judge_review_due; optionally update next_action.
+  local val="$1" next_act="${2:-}"
+  node -e '
+    (function(){
+      var fs=require("fs"), p=process.argv[1], s={};
+      try { s=JSON.parse(fs.readFileSync(p,"utf8")); } catch(e) { s={}; }
+      if ("'${val}'" === "false" || "'${val}'" === "") { delete s.judge_review_due; }
+      else { s.judge_review_due = true; }
+      if ("'${next_act}'" !== "") { s.next_action = "'${next_act}'"; }
+      if (!s._metadata) s._metadata = {};
+      s._metadata.last_updated = (new Date()).toISOString();
+      var tmp=p+".tmp";
       fs.writeFileSync(tmp, JSON.stringify(s,null,2));
       try { fs.renameSync(tmp,p); } catch(e){}
-    " 2>>"${LOG_FILE}" || true
-  else
-    node -e "
-      var fs=require('fs'), p='${STATE_PATH}', s={};
-      try { s=JSON.parse(fs.readFileSync(p,'utf8')); } catch(e) {}
-      s.judge_review_due = true;
-      var tmp=p+'.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(s,null,2));
-      try { fs.renameSync(tmp,p); } catch(e){}
-    " 2>>"${LOG_FILE}" || true
-  fi
+    })("'${STATE_PATH}'")' 2>>"${LOG_FILE}" || true
 }
 
-# Read fresh STATE.json, log the worker prompt (read-only).
-build_worker_prompt() {
-  node -e "
-    var fs=require('fs'), s={};
-    try { s=JSON.parse(fs.readFileSync('${STATE_PATH}','utf8')); } catch(e) {}
-    console.log(JSON.stringify(s,null,2));
-  " 2>/dev/null | tee -a "${LOG_FILE}" > /dev/null || true
-}
-
-# --- Gate runners: capture exit codes and output --------------------
-run_scorecard() {
-  if node "${ROOT}/scorecard.js" >>"${LOG_FILE}" 2>&1; then
-    printf '0\n'
-  else
-    local ec=$?
-    [[ ${ec} -eq 0 ]] || printf '%s\n' "${ec}"
-  fi
-}
-
-run_npm_test() {
-  if npm test >>"${LOG_FILE}" 2>&1; then
-    printf '0\n'
-  else
-    local ec=$?
-    [[ ${ec} -eq 0 ]] || printf '%s\n' "${ec}"
-  fi
-}
-
-run_npm_check() {
-  if npm run check >>"${LOG_FILE}" 2>&1; then
-    printf '0\n'
-  else
-    local ec=$?
-    [[ ${ec} -eq 0 ]] || printf '%s\n' "${ec}"
-  fi
-}
-
-run_git_diff() {
-  if git diff --check >>"${LOG_FILE}" 2>&1; then
-    printf '0\n'
-  else
-    local ec=$?
-    [[ ${ec} -eq 0 ]] || printf '%s\n' "${ec}"
-  fi
-}
-
-# --- Judge contract: consume decision values (continue, redirect, done) --
+# --- Judge contract: consume decision OR action ------------------------
 evaluate_judge() {
   [[ -f "${JUDGE_FILE}" ]] || return 0
-  local action
-  action=$(node -e "try{var d=JSON.parse(require('fs').readFileSync('${JUDGE_FILE}','utf8'));console.log((d.action||'').toLowerCase())}catch(e){}" 2>/dev/null) || true
-  case "${action:-unknown}" in
-    continue|c) printf 'continue' ;;
-    redirect|r) printf 'redirect' ;;
-    done|d)     printf 'done' ;;
-    *)          printf '' ;;  # unknown/absent → treat as continue silently.
-  esac
+  node -e '
+    (function(){
+      try { var d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); } catch(e) { process.exit(0); return; }
+      var v = (d.decision || d.action || "").toLowerCase();
+      if (v==="continue"||v==="c") { console.log("continue"); process.exit(0); }
+      if (v==="redirect"||v==="r") { console.log("redirect"); process.exit(0); }
+      if (v==="done"||v==="d")    { console.log("done"); process.exit(0); }
+      process.exit(0);
+    })("'${JUDGE_FILE}'")' 2>/dev/null || true
 }
 
-# --- OpenCode: headless noninteractive mode (best-effort) --------------
-try_start_opencode() {
-  if ! command -v opencode >/dev/null 2>&1; then
-    log "opencode CLI not on PATH. Skipping model session."
+# --- Build worker prompt (STATE.json + instructions) -------------------
+build_worker_prompt() {
+  cat "${STATE_PATH}"
+  printf '\n\nInstructions:\n'
+  printf '1. Read scorecard.js output and identify the weakest failing gate.\n'
+  printf '2. Make exactly one coherent improvement or repair to the game source files.\n'
+  printf '3. After making changes, run the gates (node scorecard.js; npm test; npm run check; git diff --check).\n'
+  printf '4. Only commit your changes if ALL gates pass.\n'
+  printf '5. Update STATE.json atomically (preserving the full top-level schema): increment pass_count by 1, '
+  printf 'update _metadata.gate_results with the latest gate exit codes, and set next_action to "worker_running".\n'
+  printf '6. Do NOT use --dangerously-skip-permissions flag.\n'
+  printf '\nState file (STATE.json) follows:\n'
+}
+
+# --- Gate runners: capture real exit codes -----------------------------
+run_gate() {
+  # Usage: run_gate "description" command... -- args...
+  local _desc="$1"; shift
+  if "$@" >>"${LOG_FILE}" 2>&1; then printf '0\n'
+  else printf '%s\n' "$?"; fi
+}
+
+# --- Idle / mtime-based worker restart ---------------------------------
+check_state_mtime_idle() {
+  # Returns 0 if STATE.json has been modified within IDLE_MINUTES, 1 otherwise.
+  [[ -f "${STATE_PATH}" ]] || return 1
+  local state_mtime now diff_sec
+  state_mtime=$(stat -f %m "${STATE_PATH}" 2>/dev/null || stat -c %Y "${STATE_PATH}" 2>/dev/null)
+  now=$(date +%s)
+  if [[ -z "${state_mtime}" ]]; then return 1; fi
+  diff_sec=$(( now - state_mtime ))
+  if [[ ${diff_sec} -gt $(( IDLE_MINUTES * 60 )) ]]; then
+    log "STATE.json idle ${diff_sec}s (>${IDLE_MINUTES}min). Worker should be restarted."
     return 1
   fi
+  return 0
+}
 
-  log "Attempting headless opencode session with model myprovider/ornith-1.0-35b-mtplx..."
+# --- Background worker management (PID tracking, crash/idle restart) --
+run_worker_background() {
+  # Launches opencode in background with the worker prompt. Polls its PID,
+  # restarts it if it crashes or if STATE.json has been idle (mtime-based).
 
-  # Try noninteractive headless mode — NEVER use --dangerously-skip-permissions.
-  if opencode run --model "myprovider/ornith-1.0-35b-mtplx" <<< "" >>"${LOG_FILE}" 2>&1; then
-    log "OpenCode headless session completed."
+  if ! command -v opencode >/dev/null 2>&1; then
+    log "opencode CLI not on PATH. Skipping model session."
+    return 127
+  fi
+
+  local prompt_file="${LOG_DIR}/worker_prompt.tmp"
+  build_worker_prompt > "${prompt_file}"
+
+  log "Launching worker: opencode run --model myprovider/ornith-1.0-35b-mtplx"
+
+  # Launch in background; track PID for polling.
+  opencode run --model "myprovider/ornith-1.0-35b-mtplx" < "${prompt_file}" >>"${LOG_FILE}" 2>&1 &
+  local wpid=$!
+  printf '%s\n' "${wpid}" > "${LOG_DIR}/worker.pid"
+
+  local max_restarts=3 restarts=0 wc_exit=0
+
+  # Poll until the worker exits; on idle or crash, restart.
+  while kill -0 "${wpid}" 2>/dev/null; do
+    if ! check_state_mtime_idle; then
+      log "Worker ${wpid} interrupted (STATE.json idle). Restarting."
+      kill "${wpid}" 2>/dev/null || true
+      wait "${wpid}" 2>/dev/null
+      build_worker_prompt > "${prompt_file}"
+      opencode run --model "myprovider/ornith-1.0-35b-mtplx" < "${prompt_file}" >>"${LOG_FILE}" 2>&1 &
+      wpid=$!
+      printf '%s\n' "${wpid}" > "${LOG_DIR}/worker.pid"
+    fi
+    sleep 5
+  done
+
+  wait "${wpid}" 2>/dev/null
+  wc_exit=$?
+  rm -f "${LOG_DIR}/worker.pid"
+
+  if [[ ${wc_exit} -ne 0 ]]; then
+    (( ++restarts ))
+    if [[ ${restarts} -ge ${max_restarts} ]]; then
+      log "Worker crashed ${restarts} times. Giving up this pass."
+    else
+      log "Worker exited with ${wc_exit}. Restarting (attempt ${restarts}/${max_restarts})."
+      build_worker_prompt > "${prompt_file}"
+      opencode run --model "myprovider/ornith-1.0-35b-mtplx" < "${prompt_file}" >>"${LOG_FILE}" 2>&1 &
+      wpid=$!
+      printf '%s\n' "${wpid}" > "${LOG_DIR}/worker.pid"
+      wait "${wpid}" 2>/dev/null
+      wc_exit=$?
+    fi
+  fi
+
+  rm -f "${prompt_file}"
+  return ${wc_exit}
+}
+
+# Best-effort `opencode serve` fallback (documented; never a fake attach).
+try_opencode_serve() {
+  command -v opencode >/dev/null 2>&1 || return 1
+  log "Best-effort: trying 'opencode serve' (not a fake attach)."
+  if opencode serve >>"${LOG_FILE}" 2>&1; then
+    log "opencode serve completed."
     return 0
   fi
-
-  # Best-effort persistent server fallback. Log clearly if attach is unavailable.
-  log "Headless mode not available; trying 'opencode serve' as persistent server..."
-  if opencode serve >>"${LOG_FILE}" 2>&1; then
-    log "opencode serve completed (attach is unavailable)."
-  else
-    log "Could not start opencode server. Proceeding without model."
-  fi
+  log "Could not start opencode server. Proceeding without model."
   return 1
 }
 
-# --- Idle / mtime-based restart & stop ----------------------------------
-check_idle() {
-  [[ -f "${STATE_PATH}" ]] || return 0
-  local now_mtime state_mtime diff_sec
-
-  # `stat -f %m` (macOS) or `stat -c %Y` (linux).
-  state_mtime=$(stat -f %m "${STATE_PATH}" 2>/dev/null || stat -c %Y "${STATE_PATH}" 2>/dev/null)
-  now_mtime=$(date +%s)
-
-  if [[ -n "${state_mtime}" ]]; then
-    diff_sec=$((now_mtime - state_mtime))
-
-    # If STATE.json untouched for >IDLE_MINUTES, stop the supervisor.
-    if [[ ${diff_sec} -gt $((IDLE_MINUTES * 60)) ]]; then
-      log "STATE.json idle ${diff_sec}s (>${IDLE_MINUTES}min). Stopping supervisor."
-      exit 0
-    fi
-
-    # If stale for > half the idle window, log a restart warning.
-    if [[ ${diff_sec} -gt $((IDLE_MINUTES * 30)) ]]; then
-      log "STATE.json stale (${diff_sec}s). Restarting session this pass."
-    fi
-  fi
-}
-
-# --- Main loop (infinite by default, --once for a single run) ---------
+# --- Main loop (infinite by default; --once exits after one pass) ------
 main() {
   log "supervisor.sh started (PID $$). RUN_ONCE=${RUN_ONCE}, BATCH_SIZE=${BATCH_SIZE}, IDLE_MINUTES=${IDLE_MINUTES}."
 
   local pass_num=0 batch_count=0
 
   while true; do
-    check_idle
-
-    # Acquire lock; skip if another instance is running.
     acquire_lock || { sleep 10; continue; }
 
     (( ++pass_num ))
     log "=== Pass ${pass_num} ==="
 
-    # Build worker prompt from freshly read STATE.json (read-only) before any mutation.
-    build_worker_prompt
+    # 1. Read fresh STATE.json into a shell variable (for the prompt).
+    local state_content
+    state_content=$(cat "${STATE_PATH}" 2>/dev/null || echo "{}")
 
-    # Atomically update pass_count, next_action, and timestamps BEFORE gates.
-    update_state "${pass_num}" "running_pass_${pass_num}"
+    # 2. Atomically increment pass_count (from existing value) and set
+    #    next_action="worker_running" BEFORE launching anything else.
+    mark_worker_running
 
-    # --- Run all gates, store actual exit codes & reports in STATE.json --
-    local sc_exit test_exit check_exit diff_exit
+    # 3. Launch worker (background, PID-tracked, with idle/crash restart).
+    run_worker_background || true
 
-    sc_exit=$(run_scorecard)
+    # 4. After worker completes, run gates and capture real exit codes.
+    local sc_exit test_ec check_ec diff_ec all_pass=true
+
+    sc_exit=$(run_gate scorecard  node "${ROOT}/scorecard.js")
     log "scorecard.js exit code: ${sc_exit}"
 
-    test_exit=$(run_npm_test)
-    log "npm test exit code: ${test_exit}"
+    test_ec=$(run_gate npm_test  "npm" "test")
+    log "npm test exit code: ${test_ec}"
 
-    check_exit=$(run_npm_check)
-    log "npm run check exit code: ${check_exit}"
+    check_ec=$(run_gate npm_check "npm" "run" "check")
+    log "npm run check exit code: ${check_ec}"
 
-    diff_exit=$(run_git_diff)
-    log "git diff --check exit code: ${diff_exit}"
+    diff_ec=$(run_gate git_diff  "git" "diff" "--check")
+    log "git diff --check exit code: ${diff_ec}"
 
-    # Determine whether all gates passed.
-    local all_pass=true
-    if [[ ${sc_exit} -ne 0 ]] || [[ ${test_exit} -ne 0 ]] || \
-       [[ ${check_exit} -ne 0 ]] || [[ ${diff_exit} -ne 0 ]]; then
+    # Store gate results atomically without destroying top-level schema.
+    store_gate_exit_codes "${sc_exit}" "${test_ec}" "${check_ec}" "${diff_ec}"
+
+    if [[ ${sc_exit} -ne 0 ]] || [[ ${test_ec} -ne 0 ]] || \
+       [[ ${check_ec} -ne 0 ]] || [[ ${diff_ec} -ne 0 ]]; then
       all_pass=false
     fi
 
     if ${all_pass}; then
       log "All gates passed on pass ${pass_num}."
     else
-      log "Gates failed (${sc_exit}/${test_exit}/${check_exit}/${diff_exit})."
+      log "Gates failed (scorecard=${sc_exit}, test=${test_ec}, check=${check_ec}, diff=${diff_ec})."
     fi
 
-    # --- Update STATE.json with gate results (next_action, pass_count) --
-    if ${all_pass}; then
-      update_state "${pass_num}" "gates_passed" \
-        "s.gate_results={scorecard_exit:${sc_exit},test_exit:${test_exit},check_exit:${check_exit},diff_exit:${diff_exit}}"
-    else
-      update_state "${pass_num}" "fix_failed_gates" \
-        "s.gate_results={scorecard_exit:${sc_exit},test_exit:${test_exit},check_exit:${check_exit},diff_exit:${diff_exit}}"
-    fi
-
-    # Try to run the model (best-effort).
-    try_start_opencode || true
-
-    # Commit pass_count/next_action to STATE.json (final for this iteration).
-    update_state "${pass_num}" "gates_passed"
-
-    # --- After BATCH_SIZE passes, set judge_review_due=true & stop ------
+    # 5. Batch local worker passes: after BATCH_SIZE, set judge_review_due
+    #    and wait for judge_decision.json.  Consume decision or action:
+    #    done -> exit; redirect -> update next_action; continue -> clear flag + reset batch.
     (( ++batch_count ))
 
     if [[ ${batch_count} -ge ${BATCH_SIZE} ]]; then
       log "Batch boundary reached (${batch_count}/${BATCH_SIZE}). Setting judge_review_due=true."
-
-      # Atomically mark review due and stop until a decision file appears.
       set_judge_flag true
 
       log "Waiting for ${JUDGE_FILE}..."
@@ -292,34 +305,29 @@ main() {
         sleep 30
       done
 
-      local decision
-      decision=$(evaluate_judge)
-
+      local decision=""
+      decision=$(evaluate_judge) || true
       case "${decision:-continue}" in
         done)
           log "Judge: done. Stopping supervisor."
-          update_state "${pass_num}" "judge_done"
+          set_judge_flag false "judge_done"
           release_lock
           exit 0
           ;;
         redirect)
-          log "Judge: redirect. Waiting for next decision after idle."
-          update_state "${pass_num}" "judge_redirect"
-          sleep $((IDLE_MINUTES * 60))
+          log "Judge: redirect."
+          set_judge_flag false "redirect"
           batch_count=0
-          set_judge_flag false
           ;;
         continue|*)
           log "Judge: continue (or absent). Resuming."
-          update_state "${pass_num}" "judge_continue"
+          set_judge_flag false ""
           batch_count=0
-          set_judge_flag false
           ;;
       esac
 
     else
-      # Reset judge_review_due for non-boundary passes.
-      set_judge_flag false
+      set_judge_flag false ""
     fi
 
     release_lock
@@ -330,7 +338,7 @@ main() {
     fi
 
     log "Idle for ${IDLE_MINUTES} minutes before next pass."
-    sleep $((IDLE_MINUTES * 60))
+    sleep $(( IDLE_MINUTES * 60 ))
 
   done
 }
