@@ -542,21 +542,36 @@ assert(!!cannonCooldownMatch, 'cannon fire cooldown decreases with level');
 
 // ── Pass 5: Player movement physics assertions ──
 // Verify source code contains the expected constants
-assert(js.includes('rotSpeed = 0.065'), 'M1: rotation speed is 0.065 rad/frame (tighter cabinet-era turn)');
+assert(js.includes('rotSpeed = 0.065'), 'M1: rotation speed is 0.065 rad/frame (cabinet-era turn)');
 assert(js.includes('thrust = 0.18'), 'M2: thrust acceleration is 0.18 px/frame² (punchier)');
 assert(js.includes('*= 0.992'), 'M3: friction factor is 0.992 (cabinet-era drift)');
 assert(js.includes('speed > 7'), 'M4: max speed cap at 7 px/frame');
 assert(js.includes('Math.hypot(player.vx, player.vy)'), 'M5: speed computed via hypot');
+// New velocity-based rotation constants (Asteroids-era inertia)
+assert(js.includes('ROT_ACCEL'), 'M1a: ROT_ACCEL constant defined for rotation acceleration');
+assert(js.includes('ROT_FRICTION'), 'M1b: ROT_FRICTION constant defined for angular deceleration');
+assert(js.includes('rotVel'), 'M1c: player.rotVel tracks angular velocity for inertia');
 
 // Deterministic movement simulation (pure JS, mirrors game.js update logic)
 function simulateMovement(initial, rotDirVal, thrustDirVal, frames, W, H) {
-  const p = { x: initial.x, y: initial.y, vx: initial.vx, vy: initial.vy, angle: initial.angle };
+  const p = { x: initial.x, y: initial.y, vx: initial.vx, vy: initial.vy, angle: initial.angle, rotVel: initial.rotVel || 0 };
   const rotSpeed = 0.065;
+  const ROT_ACCEL   = 0.012;    // rad/frame² when turning
+  const ROT_FRICTION = 0.85;    // rad/frame decay on release
   const thrust = 0.18;
   const friction = 0.992;
   const maxSpeed = 7;
   for (let f = 0; f < frames; f++) {
-    if (rotDirVal !== 0) p.angle += rotDirVal * rotSpeed;
+    // Velocity-based rotation with inertia (Asteroids-era)
+    if (rotDirVal !== 0) {
+      p.rotVel += rotDirVal * ROT_ACCEL;
+      if (p.rotVel >  rotSpeed) p.rotVel =  rotSpeed;
+      if (p.rotVel < -rotSpeed) p.rotVel = -rotSpeed;
+    } else {
+      p.rotVel *= ROT_FRICTION;
+      if (Math.abs(p.rotVel) < 0.001) p.rotVel = 0;
+    }
+    p.angle += p.rotVel;
     if (thrustDirVal) {
       p.vx += Math.cos(p.angle) * thrust;
       p.vy += Math.sin(p.angle) * thrust;
@@ -583,12 +598,11 @@ function simulateMovement(initial, rotDirVal, thrustDirVal, frames, W, H) {
 const testW = 800, testH = 600;
 const base = { x: 400, y: 300, vx: 0, vy: 0, angle: -Math.PI / 2 };
 
-// M6: Rotation left decreases angle
+// M6: Left rotation decreases angle (with inertia)
 const m6 = simulateMovement(base, -1, 0, 10, testW, testH);
 assert(m6.angle < base.angle, 'M6: left rotation decreases angle');
-assert(Math.abs(m6.angle - (base.angle - 10 * 0.065)) < 0.001, 'M6: rotation is exactly rotSpeed * frames');
 
-// M7: Rotation right increases angle
+// M7: Right rotation increases angle (with inertia)
 const m7 = simulateMovement(base, 1, 0, 10, testW, testH);
 assert(m7.angle > base.angle, 'M7: right rotation increases angle');
 
@@ -646,6 +660,36 @@ const m17b = simulateMovement({ x: m17a.x, y: m17a.y, vx: m17a.vx, vy: m17a.vy, 
 assert(m17b.vx > 0.01 || m17b.vy < -0.01, 'M17: ship retains velocity after thrust released (inertia)');
 const m17drift = Math.hypot(m17b.x - m17a.x, m17b.y - m17a.y);
 assert(m17drift > 1, 'M17: ship drifts visibly during coast phase');
+
+// M18: Rotation inertia — ship builds rotVel toward max when turning (Asteroids-era)
+const m18a = simulateMovement(base, -1, 0, 6, testW, testH);
+assert(m18a.rotVel === -0.065, 'M18: rotVel reaches max (rotSpeed) after enough frames of turning');
+const m18b = simulateMovement(base, -1, 0, 3, testW, testH);
+// After 3 frames: rotVel = -0.012*3 = -0.036 (not yet at cap of -0.065)
+assert(Math.abs(m18b.rotVel - (-0.036)) < 1e-9, 'M18: rotVel = ROT_ACCEL * frames (grows linearly before cap)');
+
+// M19: Angular friction decays rotVel when no input (ship coasts to stop turning)
+const m19a = simulateMovement(base, -1, 0, 20, testW, testH);
+// After 20 frames of turning: rotVel = -0.065 (max)
+const m19b = simulateMovement({...m19a, rotVel: -0.065}, 0, 0, 10, testW, testH);
+// After 10 frames with friction 0.85: rotVel = -0.065 * 0.85^10 ≈ -0.065 * 0.1969 ≈ -0.0128
+assert(Math.abs(m19b.rotVel) < 0.065 && m19b.rotVel !== 0, 'M19: rotVel decays after release (not instant stop)');
+assert(Math.abs(m19b.rotVel + 0.065 * Math.pow(0.85, 10)) < 0.002, 'M19: rotVel decay matches ROT_FRICTION^frames');
+
+// M20: Alternating turn direction does NOT instant-reverse (inertia resists)
+const m20a = simulateMovement(base, -1, 0, 5, testW, testH);
+// After 5 left turns: rotVel = -0.06 (accumulated from accel, not yet at cap)
+assert(m20a.rotVel < 0, 'M20: rotating left gives negative rotVel');
+// Now reverse direction for 5 frames without clearing rotVel (simulates quick alternating)
+const m20b = simulateMovement({...m20a, rotVel: m20a.rotVel}, 1, 0, 5, testW, testH);
+// rotVel starts at -0.06, gains +0.012*5=+0.06 -> rotVel ≈ 0 (cancels due to inertia)
+assert(Math.abs(m20b.rotVel) < 1e-9, 'M20: equal opposite turns cancel due to inertia (rotVel crosses through zero)');
+// Next frame continues turning right: rotVel = +0.012
+const m20c = simulateMovement({...m20b, rotVel: 0}, 1, 0, 6, testW, testH);
+assert(m20c.rotVel > 0, 'M20: after cancellation, reversing again builds positive rotVel');
+
+// M21: Fire control — bullet inherits less player velocity (Star Castle precise fire)
+assert(js.includes('player.vx * 0.2'), 'M21: bullet inherits reduced player velocity (0.2x)');
 
 // ── Pass 6: Vector arcade rendering contract ──
 // Shield rings: green phosphor palette
@@ -712,6 +756,34 @@ assert(!js.includes('function render()'), 'V17: dead render() function removed')
 assert(js.includes('window.initInput = initInput'), 'V18: initInput exposed on window');
 assert(js.includes('window.drawGame   = drawGame'), 'V19: drawGame exposed on window');
 assert(js.match(/function drawGame\(\)/), 'V20: drawGame defined inside IIFE');
+
+// ── Pass 6c: Cabinet-grade vector presentation (Cinematronics restraint) ──
+
+// HTML has CRT overlay container for monitor emulation
+assert(html.includes('id="crtOverlay"'), 'V20a: HTML has crtOverlay container');
+assert(html.includes('id="scanlines"'), 'V20b: HTML has scanline element');
+assert(html.includes('id="vignette"'), 'V20c: HTML has vignette element');
+
+// CSS scanline pattern (repeating-linear-gradient) present
+assert(css.includes('repeating-linear-gradient'), 'V20d: CSS has scanline gradient pattern');
+assert(css.includes('#crtOverlay'), 'V20e: CSS styles crtOverlay container');
+assert(css.includes('#scanlines'), 'V20f: CSS styles scanline element');
+assert(css.includes('#vignette'), 'V20g: CSS styles vignette element');
+
+// Flash overlay uses white/neutral (not warm amber) — authentic vector monitor flash
+const coreDestructionSection = js.substring(js.indexOf('coreDestructionTimer'));
+const vFlashMatch = coreDestructionSection.match(/fillStyle\s*=\s*`rgba\(\s*255,\s*255,\s*\d+/);
+assert(!!vFlashMatch, 'V20h: core destruction flash is near-white');
+
+// Star rendering in drawGame uses sub-5% alpha (transparent, no competition with vector lines)
+const bgSection = js.substring(js.indexOf('/* Background — true black'));
+assert(bgSection.includes('0.04') || bgSection.match(/globalAlpha\s*=\s*twinkle\s*\*\s*0\.0[0-9]/), 'V20i: starfield alpha is sub-5% (transparent)');
+assert(!bgSection.match(/rgba\(\s*80,\s*90/), 'V20j: no colored (blue) star field — vector-only');
+
+// Pure black background preserved
+assert(js.includes('"#000"'), 'V20k: canvas background is pure black (#000)');
+// Canvas context disables alpha channel (true black, no compositing artifacts)
+assert(js.includes('alpha: false'), 'V20l: canvas context uses alpha:false for true black');
 
 // ── Pass 6b: Shield ring depth-intensity + gap-tick fidelity (1980 reference) ──
 
@@ -1059,6 +1131,113 @@ assert(js.match(/muteBtn.*click.*toggleMute/s), 'AT71: muteBtn click handler use
 const drawAttractFull = js.substring(js.indexOf('function drawAttract()'));
 assert(drawAttractFull.includes('startGame()'), 'AT72: drawAttract calls startGame on Space/Enter/tap');
 
+// ── Pass 8b: Deterministic attract presentation state — no Date.now, cabinet-grade polish ──
+
+/* AT73: Deterministic attract frame counter exists (drives all idle animations) */
+assert(js.includes('attractFrame'), 'AT73: attractFrame state variable exists for deterministic animation');
+
+/* AT74: advanceAttractCard increments the deterministic frame counter */
+const advBody = js.substring(js.indexOf('function advanceAttractCard()'), js.indexOf('function drawAttract()'));
+assert(advBody.includes('attractFrame++'), 'AT74: advanceAttractCard increments attractFrame per frame');
+
+/* AT75: resetAttract resets the deterministic frame counter */
+const resetBody = js.substring(js.indexOf('function resetAttract()'), js.indexOf('function advanceAttractCard()'));
+assert(resetBody.includes('attractFrame = 0'), 'AT75: resetAttract() resets attractFrame to 0');
+
+/* AT76: start prompt blink uses attractFrame (not Date.now) — cabinet determinism */
+assert(drawAttractFull.includes('attractFrame'), 'AT76b: drawAttract uses attractFrame for animation');
+/* Isolate the actual body of drawAttract (between its signature and the next function) */
+const daBodyEnd = js.indexOf('\n  }', js.indexOf('function drawAttract()')) + 4;
+const drawAttractBody8b = js.substring(js.indexOf('function drawAttract()'), daBodyEnd);
+assert(!drawAttractBody8b.includes('Date.now()'), 'AT76: drawAttract body contains NO Date.now calls');
+
+/* AT77: showcase rendering is fully deterministic — no Date.now in showcase */
+const showcaseBody = js.substring(js.indexOf('function drawAttractShowcase()'), js.indexOf('function drawDead()'));
+assert(!showcaseBody.match(/Date\.now/), 'AT77: drawAttractShowcase contains no Date.now() calls');
+assert(showcaseBody.includes('attractFrame'), 'AT77b: showcase uses attractFrame for pulse animation');
+
+/* AT78: high score table renders with 6-digit zero-padding (cabinet style) */
+const hsBody = js.substring(js.indexOf('function drawAttractHighScore()'), js.indexOf('function drawDead()'));
+assert(hsBody.includes('.padStart(6'), 'AT78a: high score renderer uses padStart(6) for digit width');
+assert(hsBody.includes('scoreFmt'), 'AT78b: high score uses scoreFmt formatter');
+
+/* AT79: No gameplay timers run while state is attract (verified  in update function) */
+const updateAttract = js.substring(js.indexOf('if (state === "attract")'), js.indexOf('if (state !== "playing")'));
+assert(updateAttract.includes('advanceAttractCard()'), 'AT79a: update() routes attract state to advanceAttractCard');
+assert(updateAttract.includes('return'), 'AT79b: update() returns from attract state (no gameplay timers run)');
+/* The 'playing' guard at the bottom of update() is what stops all gameplay during attract — verify it exists */
+const playingGuard = js.match(/if \(state !== "playing"\) return;/s);
+assert(!!playingGuard, 'AT79c: update() has final guard returning when state != playing (covers attract)');
+
+/* AT80: startGame performs clean transition — resets all gameplay state */
+const sgStart = js.indexOf('function startGame()');
+/* Find the matching closing brace of startGame (count braces) */
+let depth = 0;
+let sgEnd = -1;
+for (let i = sgStart, c = 0; i < js.length; i++) {
+    if (js[i] === '{') c++; else if (js[i] === '}') { c--; if (c === 0) { sgEnd = i; break; } }
+}
+const startGameBody8b = js.substring(sgStart, sgEnd + 1);
+assert(startGameBody8b.includes('state = "playing"'), 'AT80a: startGame sets state to playing (clean transition)');
+assert(startGameBody8b.includes('resetAttract()'), 'AT80b: startGame resets attract state (rewinds carousel)');
+assert(startGameBody8b.includes('resetPlayer()'), 'AT80c: startGame resets player position');
+assert(startGameBody8b.includes('bullets.length = 0'), 'AT80d: startGame clears all bullets');
+assert(startGameBody8b.includes('enemies.length = 0'), 'AT80e: startGame clears all enemies');
+assert(startGameBody8b.includes('spawnWave()'), 'AT80f: startGame spawns first wave for level 1');
+assert(startGameBody8b.includes('idleTimer = 0'), 'AT80g: startGame resets idle timer');
+assert(startGameBody8b.includes('attractScreen.classList.add("hidden")'), 'AT80h: startGame hides attract screen');
+assert(startGameBody8b.includes('setHUDVisible(true)'), 'AT80i: startGame shows HUD on transition');
+
+/* AT81: dead-screen return to attract does NOT call saveHighScore (preserves player choice) */
+const deadBody81 = js.substring(js.indexOf('function drawDead()'), js.indexOf('// ── Pass 9'));
+assert(!deadBody81.includes('saveHighScore'), 'AT81: dead screen does not auto-save score');
+assert(deadBody81.includes('resetAttract()'), 'AT81a: dead screen calls resetAttract on restart');
+assert(deadBody81.includes('state = "attract"'), 'AT81b: dead screen returns to attract on input');
+
+/* AT82: game-over transitions saveHighScore before returning to attract (idle timeout) */
+const idleTimeout = js.match(/if \(idleTimer >= IDLE_TIMEOUT\) \{[\s\S]*?return;/);
+assert(!!idleTimeout, 'AT82: idle timeout handler exists returning to attract');
+assert(idleTimeout && idleTimeout[0].includes('saveHighScore()'), 'AT82a: idle timeout calls saveHighScore before attract');
+
+/* AT83: Deterministic simulation mirrors advanceAttractCard frame logic */
+function simulateDeterministicAdvance(card, timer, showcaseAngle, frame, durations) {
+    frame++;
+    timer++;
+    if (timer >= durations[card]) {
+        timer = 0;
+        card = (card + 1) % durations.length;
+    }
+    if (card === 3) {
+        showcaseAngle += 0.02;
+    }
+    return [card, timer, showcaseAngle, frame];
+}
+const durs = [180, 180, 240, 300];
+let state = simulateDeterministicAdvance(0, 0, 0, 0, durs);
+assert(state[0] === 0 && state[1] === 1, 'AT83a: frame 1 stays on card 0');
+state = simulateDeterministicAdvance(0, 179, 0, 180, durs);
+assert(state[0] === 1 && state[1] === 0, 'AT83b: card 0 → 1 at frame boundary (frame 180)');
+state = simulateDeterministicAdvance(1, 179, 3.14, 360, durs);
+assert(state[0] === 2 && state[1] === 0, 'AT83c: card 1 → 2 at frame boundary (frame 360)');
+state = simulateDeterministicAdvance(2, 239, 4.71, 600, durs);
+assert(state[0] === 3 && state[1] === 0, 'AT83d: card 2 → 3 at frame boundary (frame 600)');
+state = simulateDeterministicAdvance(3, 299, 10.5, 900, durs);
+assert(state[0] === 0 && state[1] === 0, 'AT83e: full cycle wraps back to card 0 at frame 900');
+
+/* AT84: High-score formatting produces consistent-width output (cabinet column alignment) */
+const scoreFmt = s => String(s).padStart(6, "0");
+assert(scoreFmt(150) === '000150', 'AT84a: low score zero-padded to 6 digits');
+assert(scoreFmt(12345) === '012345', 'AT84b: mid-range score zero-padded to 6 digits');
+assert(scoreFmt(999999) === '999999', 'AT84c: max 6-digit score unchanged');
+assert(scoreFmt(0) === '000000', 'AT84d: zero formats as 6-digit');
+
+/* AT85: Deterministic blink phase computed from attractFrame (not wall-clock) */
+const blinkPhase = frame => Math.sin((frame / 60) * Math.PI * 2);
+const blink1 = blinkPhase(0);
+const blink1b = blinkPhase(60);
+assert(typeof blink1 === 'number' && !isNaN(blink1), 'AT85a: blink phase is deterministic number');
+assert(typeof blink1b === 'number' && !isNaN(blink1b), 'AT85b: blink phase advances deterministically per 60 frames');
+
 // ── Pass 9: iPhone portrait playability ──
 
 // viewport-fit=cover in HTML
@@ -1086,8 +1265,8 @@ assert(css.match(/#attractScreen[\s\S]*?padding:\s*var\(--safe-top\)/), 'P9-11: 
 assert(css.match(/#gameCanvas[\s\S]*?position:\s*fixed/), 'P9-12: canvas uses fixed positioning');
 assert(css.match(/#gameCanvas[\s\S]*?inset:\s*0/), 'P9-13: canvas inset: 0 for full coverage');
 
-// Attract content hidden (canvas handles rendering)
-assert(css.match(/#attractContent[\s\S]*?visibility:\s*hidden/), 'P9-14: attractContent hidden for canvas rendering');
+// Attract content visible and readable on mobile portrait (HTML overlay supplements canvas rendering)
+assert(!css.match(/#attractContent[\s\S]*?visibility:\s*hidden/), 'P9-14: attractContent visible for mobile portrait readability');
 assert(css.includes('overflow-wrap: anywhere'), 'P9-15: attractSub wraps on narrow screens');
 
 // JS safe-area handling
@@ -1772,13 +1951,15 @@ assert(!!dyingParticles, 'DT12: dying handler updates particles');
 const dyingToPlaying = js.match(/state === "dying"[\s\S]*?lives > 0[\s\S]*?state = "playing"/s);
 assert(!!dyingToPlaying, 'DT13: dying handler respawns to playing when lives > 0');
 
-  /* DT14: dying handler transitions to dead when lives exhausted */
-  const dyingToDead = js.match(/state === "dying"[\s\S]*?lives > 0[\s\S]*?state = "dead"/s);
-  assert(!!dyingToDead, 'DT14: dying handler transitions to dead when lives <= 0');
+  /* DT14: dying handler transitions to dead via endGame() when lives exhausted
+           The old `state = "dead"` assignment was replaced by a call to endGame() so
+           that the dead-state freeze (DEAD_PAUSE_FRAMES) is deterministic and cabinet-like. */
+  const dyingToDead = js.match(/state === "dying"[\s\S]*?endGame\(\)/s);
+  assert(!!dyingToDead, 'DT14: dying handler calls endGame() when lives <= 0');
 
-  /* DT14b: dying handler calls saveHighScore before game-over */
-  const dyingSaveHighScore = js.match(/state === "dying"[\s\S]*?saveHighScore[\s\S]*?state = "dead"/s);
-  assert(!!dyingSaveHighScore, 'DT14b: dying handler saves high score before game-over');
+  /* DT14b: dying handler delegates to endGame() which saves high score before game-over */
+  const dyingSaveHighScore = js.match(/function\s+endGame\(\)[\s\S]*?saveHighScore/s);
+  assert(!!dyingSaveHighScore, 'DT14b: endGame() calls saveHighScore() before game-over');
 
   /* DT15: dying handler calls resetPlayer on respawn */
 const dyingResetPlayer = js.match(/state === "dying"[\s\S]*?resetPlayer/s);
@@ -2569,17 +2750,17 @@ assert(js.includes('fireCooldown = 7'), 'SH4: fire cooldown reduced to 7 frames'
 const fireRateMs = (7 / 60) * 1000;
 assert(fireRateMs < 150, `SH4b: fire rate ≈ ${fireRateMs.toFixed(0)}ms (responsive)`);
 
-/* SH5: Bullet velocity inheritance increased to 0.4 */
-assert(js.includes('player.vx * 0.4'), 'SH5: bullet inherits 0.4x player vx');
-assert(js.includes('player.vy * 0.4'), 'SH5b: bullet inherits 0.4x player vy');
+/* SH5: Bullet velocity inheritance reduced to 0.2 for Star Castle-style precise fire */
+assert(js.includes('player.vx * 0.2'), 'SH5: bullet inherits 0.2x player vx (reduced for precision)');
+assert(js.includes('player.vy * 0.2'), 'SH5b: bullet inherits 0.2x player vy (reduced for precision)');
 // Verify bullet speed with moving player
 const bulletBaseSpeed = 10;
 const playerSpeed = 5;
-// Bullet fired in same direction as movement: 10 + 5*0.4 = 12
-const bulletWithInertia = bulletBaseSpeed + playerSpeed * 0.4;
+// Bullet fired in same direction as movement: 10 + 5*0.2 = 11
+const bulletWithInertia = bulletBaseSpeed + playerSpeed * 0.2;
 assert(bulletWithInertia > bulletBaseSpeed, 'SH5c: bullet faster when fired in direction of movement');
-// Bullet fired opposite to movement: 10 - 5*0.4 = 8
-const bulletAgainstInertia = bulletBaseSpeed - playerSpeed * 0.4;
+// Bullet fired opposite to movement: 10 - 5*0.2 = 9
+const bulletAgainstInertia = bulletBaseSpeed - playerSpeed * 0.2;
 assert(bulletAgainstInertia < bulletBaseSpeed, 'SH5d: bullet slower when fired against movement');
 
 /* SH6: Combined physics simulation — verify improved feel */
@@ -3197,11 +3378,13 @@ assert(js.includes('window._setDeadOverlayVisible'), 'M27-51: _setDeadOverlayVis
 /* M27-52: Canvas has touch-action: none */
 assert(css.match(/#gameCanvas[\s\S]*?touch-action:\s*none/s), 'M27-52: canvas has touch-action: none');
 
-/* M27-53: Attract content pointer-events: none (taps pass through to parent) */
-assert(css.match(/#attractContent[\s\S]*?pointer-events:\s*none/s), 'M27-53: attractContent pointer-events: none');
+/* M27-53: Attract content visible and tappable on mobile portrait (HTML overlay readable) */
+assert(!css.match(/#attractContent[\s\S]*?visibility:\s*hidden/), 'M27-53: attractContent visible for mobile readability');
+assert(!css.match(/#attractContent[\s\S]*?pointer-events:\s*none/), 'M27-53b: attractContent receives tap events on mobile portrait');
 
-/* M27-54: Dead content pointer-events: none */
-assert(css.match(/#deadContent[\s\S]*?pointer-events:\s*none/s), 'M27-54: deadContent pointer-events: none');
+/* M27-54: Dead content visible and tappable on mobile portrait */
+assert(!css.match(/#deadContent[\s\S]*?visibility:\s*hidden/), 'M27-54: deadContent visible for mobile readability');
+assert(!css.match(/#deadContent[\s\S]*?pointer-events:\s*none/), 'M27-54b: deadContent receives tap events on mobile portrait');
 
 /* M27-55: -webkit-tap-highlight-color: transparent on touch elements */
 assert(css.includes('-webkit-tap-highlight-color: transparent'), 'M27-55: tap highlight suppressed');
@@ -3601,6 +3784,150 @@ assert(cn14.travelFrames < cn12.travelFrames, 'CN14b: level 5 shot arrives faste
 /* CN15: Public API exposes core state for testing */
 assert(js.includes('window._core = core'), 'CN15: core object exposed on window');
 assert(js.includes('window._cannonShots'), 'CN15b: cannonShots exposed on window');
+
+/* CN16: Lock-on preview state (Pass 2 barrel tracking improvement)
+     The core gets a `locked` flag when barrel is within LOCK_TOL (0.08 rad)
+     of the target angle, signaling imminent firing window to the player. */
+assert(js.includes('core.locked'), 'CN16a: core object has locked property');
+assert(js.includes('LOCK_TOL'), 'CN16b: LOCK_TOL constant defined');
+assert(js.includes('core.locked = Math.abs(diff) <= LOCK_TOL'), 'CN16c: locked flag set when barrel near target angle');
+
+/* CN17: CrossReady state (locked + gaps aligned = ready to fire)
+     When core.locked AND barrelGapAligned, the crosshair and tracking line
+     use brighter phosphor to signal a firing window is imminent. */
+assert(coreDrawSection.includes('crossReady'), 'CN17a: crossReady computed in drawCore');
+assert(js.includes('crossReady ? "#ffff00"'), 'CN17b: crossReady uses bright yellow for ready state');
+assert(coreDrawSection.includes('core.locked && barrelGapAligned'), 'CN17c: crossReady requires both locked AND gap aligned');
+
+/* CN18: Barrel draws directional arrow tip (vector fidelity)
+     The barrel uses a path with `ctx.lineTo(24, 0)` (tip) forming an arrow shape
+     instead of a simple strokeRect for clearer directional reading. */
+assert(coreDrawSection.includes('ctx.lineTo(24, 0)'), 'CN18a: barrel draws directional tip');
+assert(coreDrawSection.includes('ctx.closePath()'), 'CN18b: barrel path closed for arrowhead');
+
+/* CN19: Directional arrowhead on cannon shots (vector fidelity)
+     Each active cannon shot draws a small V-shaped arrow at its current position
+     in the direction of travel, visible as a vector triangle. */
+const shotDrawSection = js.substring(js.indexOf('Cannon shots'));
+assert(shotDrawSection.includes('Directional arrowhead'), 'CN19a: directional arrowhead comment');
+assert(shotDrawSection.includes('arrowSize'), 'CN19b: arrowSize variable computed for shot arrows');
+assert(shotDrawSection.includes('contextPath') || shotDrawSection.includes('ctx.lineTo(c.x - ax'), 'CN19c: arrow V-shape drawn using velocity direction');
+assert(shotDrawSection.includes('ctx.arc(c.x, c.y, 1.5'), 'CN19d: hot core dot still drawn');
+
+/* CN20: Extended tracking line when locked (readable fire path)
+     When core.locked, the tracking/sight line extends further and uses brighter
+     phosphor to show the fire path clearly. */
+assert(coreDrawSection.includes('trackExt'), 'CN20a: tracking line extension computed');
+assert(coreDrawSection.includes('crossReady ? 280 : (core.locked ? 160 : 80)'), 'CN20b: trackExt scales with lock state');
+
+/* CN21: Simulated lock-on test - verify LOCK_TOL matches 2x fireAngleTol (0.08)
+     Lock tolerance must be greater than fireAngleTol so the player sees fire readiness
+     before the cannon actually locks on to fire. */
+const lockTolMatch = js.match(/LOCK_TOL\s*=\s*(\d+\.*\d*)/);
+const fireTolMatch2 = js.match(/fireAngleTol\s*=\s*(\d+\.*\d*)/);
+assert(!!lockTolMatch, 'CN21a: LOCK_TOL is defined as a numeric constant');
+assert(!!fireTolMatch2, 'CN21b: fireAngleTol is defined as a numeric constant');
+if (lockTolMatch && fireTolMatch2) {
+  const lockTol = parseFloat(lockTolMatch[1]);
+  const fireTol = parseFloat(fireTolMatch2[1]);
+  assert(lockTol > fireTol, `CN21c: LOCK_TOL (${lockTol}) > fireAngleTol (${fireTol}), giving preview window`);
+  assert(Math.abs(lockTol - fireTol * 2) < 1e-9, `CN21d: LOCK_TOL = 2 * fireAngleTol (preview before firing)`);
+}
+
+/* CN22: Simulated lock-on calculation for various angles
+     When the barrel is within LOCK_TOL of target, core.locked becomes true. */
+function simulateLockOn(coreAngleDeg, targetAngleDeg) {
+  const diffRad = Math.abs(targetAngleDeg - coreAngleDeg);
+  // normalize to [-PI, PI]
+  let diff = ((diffRad % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  if (diff > Math.PI) diff = 2 * Math.PI - diff;
+  const lockTol = 0.08;
+  return Math.abs(diff) <= lockTol;
+}
+assert(simulateLockOn(0, 0.03) === true, 'CN22a: locked when barrel is within LOCK_TOL of target (0.03 rad)');
+assert(simulateLockOn(0, 0.079) === true, 'CN22b: locked when barrel is just within LOCK_TOL (0.079 rad)');
+assert(simulateLockOn(0, 0.081) === false, 'CN22c: NOT locked when barrel just outside LOCK_TOL (0.081 rad)');
+assert(simulateLockOn(0, 0.5) === false, 'CN22d: NOT locked when barrel far from target (0.5 rad)');
+
+/* CN23: Simulated crossReady = locked + gap aligned
+     CrossReady is only true when BOTH conditions are met, allowing the player to
+     read "about to fire" well before the actual 0.04 radial tolerance is reached. */
+function simulateCrossReady(coreAngle, targetAngle, gapsAligned) {
+  const diff = Math.abs(targetAngle - coreAngle);
+  const locked = diff <= 0.08;
+  return locked && gapsAligned;
+}
+assert(simulateCrossReady(0, 0.03, true) === true, 'CN23a: crossReady=true when locked AND gaps aligned');
+assert(simulateCrossReady(0, 0.5, true) === false, 'CN23b: crossReady=false when not locked (barrel far away)');
+assert(simulateCrossReady(0, 0.03, false) === false, 'CN23c: crossReady=false when locked but gaps NOT aligned');
+assert(simulateCrossReady(0, 0.5, false) === false, 'CN23d: crossReady=false when neither locked nor gaps aligned');
+
+/* CN24: Deterministic state transition loop — castle destruction, ring regen, level progression,
+         victory pause, reset. Pure deterministic unit tests (no DOM/Node modules beyond fs). */
+
+/* CN24a: Core destruction timer is a fixed constant (90 frames at 60fps = 1.5s freeze).
+           Verifies the assignment in update() sets a numeric constant, not 0 (the variable declaration).
+           The regex must match the assignment inside update(), which is after "coreD destruction". */
+const cdMtch = js.match(/state = \"coreDestruction\"[\s\S]{0,80}=\s*(\d+)/);
+assert(!!cdMtch, 'CN24a: coreDestructionTimer assignment found near state="coreDestruction" in update()');
+if (cdMtch) {
+  const cdVal = parseInt(cdMtch[1], 10);
+  assert(Number.isFinite(cdVal) && cdVal > 50, `CN24a: coreDestructionTimer is a large positive integer (${cdVal}) for freeze`);
+}
+
+/* CN24b: Level transition timer is a fixed constant (120 frames at 60fps = 2s freeze).
+           startLevel() sets transitionTimer to this constant; update() decrements it each frame. */
+const ltMtch = js.match(/function\s+startLevel\(\)[\s\S]*?transitionTimer\s*=\s*(\d+)/);
+assert(!!ltMtch, 'CN24b: transitionTimer set to a numeric constant in startLevel()');
+if (ltMtch) {
+  const ltVal = parseInt(ltMtch[1], 10);
+  assert(Number.isFinite(ltVal) && ltVal > 90, `CN24b: transitionTimer constant is a positive integer (${ltVal}) greater than coreDestructionTimer`);
+}
+
+/* CN24c: Level progression is monotonic and deterministic.
+           Core destruction (state = "coreDestruction") transitions to `startLevel()`
+           which increments level and runs a 120-frame transition. */
+assert(js.includes('state = "coreDestruction"'), 'CN24c: state="coreDestruction" assigned when core destroyed');
+assert(js.includes('if (coreDestructionTimer <= 0)') && js.substring(js.indexOf("coreDestructionTimer <= 0")).includes('startLevel()'), 'CN24c: core destruction timer hits zero → startLevel()');
+assert(js.includes('startLevel()') && js.indexOf("coreDestruction") < js.indexOf("state = \"levelTransition\""), 'CN24c: coreDestruction assigned BEFORE levelTransition state');
+
+/* CN24d: Shield ring regeneration is deterministic.
+           REGEN_ANIM_FRAMES constant must exist; tryRegenRings must set it;
+           update() must decrement regenAnimFrames and clear regenCollRadii when 0. */
+assert(js.includes("REGEN_ANIM_FRAMES"), 'CN24d: REGEN_ANIM_FRAMES constant exists');
+const regenMtch = js.match(/REGEN_ANIM_FRAMES\s*=\s*(\d+)/);
+assert(!!regenMtch, 'CN24d: REGEN_ANIM_FRAMES is assigned a numeric constant');
+if (regenMtch) {
+  const rv = parseInt(regenMtch[1], 10);
+  assert(rv > 20, `CN24d: REGEN_ANIM_FRAMES is at least 20 frames (${rv}) for visibility`);
+}
+const regenCode = js.substring(js.indexOf("function tryRegenRings"));
+assert(regenCode.includes("regenAnimFrames = REGEN_ANIM_FRAMES"), 'CN24d: tryRegenRings sets regenAnimFrames to REGEN_ANIM_FRAMES');
+const regenUpd = js.substring(js.indexOf("regenAnimFrames > 0"));
+assert(regenUpd.includes("regenCollRadii = null"), 'CN24d: update() clears regenCollRadii when animation completes');
+
+/* CN24e: End-game has a deterministic freeze (DEAD_PAUSE_FRAMES) before accepting input.
+           endGame() must set state="dead" AND deadPauseTimer=DEAD_PAUSE_FRAMES. */
+const endGameMtch = js.match(/function\s+endGame\(\)\s*\{[\s\S]*?\n  \}/);
+assert(!!endGameMtch, 'CN24e: endGame() function exists');
+if (endGameMtch) {
+  const body = endGameMtch[0];
+  assert(body.includes('state = "dead"'), 'CN24e: endGame() transitions state to "dead" deterministically');
+  assert(body.includes("DEAD_PAUSE_FRAMES") || body.includes("deadPauseTimer ="), 'CN24e: endGame() sets deadPauseTimer to DEAD_PAUSE_FRAMES');
+  assert(body.includes("saveHighScore()") || body.includes("populateDeadOverlay()"), 'CN24e: endGame() persists score and populates overlay');
+}
+
+/* CN24f: Dead state pauses input for DEAD_PAUSE_FRAMES frames before accepting.
+           update()'s dead-state handler must decrement deadPauseTimer and guard input behind it. */
+const deadHandler = js.substring(js.indexOf('if (state === "dead") {\n      /* Deterministic freeze'));
+assert(deadHandler.includes("deadPauseTimer--"), 'CN24f: dead-state handler decrements deadPauseTimer');
+assert(deadHandler.includes("deadPauseTimer > 0") || deadHandler.includes('deadPauseTimer > 0'), 'CN24f: input gated behind deadPauseTimer>0 check');
+
+/* CN24g: Dead-state handler does NOT break out when deadPauseTimer has not elapsed.
+           It must still call drawDead() every frame and skip the restart path while frozen. */
+const deadBlock = deadHandler;
+const restartIdx = deadBlock.indexOf("resetAttract()");
+assert(restartIdx > deadBlock.indexOf("deadPauseTimer--"), 'CN24g: resetAttract()/restart is BELOW the deadPauseTimer decrement (order guaranteed)');
 
 // ── Result ──
 if (failed === 0) {

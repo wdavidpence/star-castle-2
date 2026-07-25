@@ -33,6 +33,36 @@ html, body {
   touch-action: none;
 }
 
+/* ── CRT vector-monitor overlay: scanlines + vignette ───── */
+#crtOverlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+#scanlines {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 1px,
+    rgba(0, 0, 0, 0.25) 1px,
+    rgba(0, 0, 0, 0.25) 2px
+  );
+}
+
+#vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 55%,
+    rgba(0, 0, 0, 0.45) 100%
+  );
+}
+
 #attractScreen {
   position: fixed;
   inset: 0;
@@ -53,27 +83,35 @@ html, body {
 }
 
 #attractContent {
-  visibility: hidden;
-  pointer-events: none;
+  text-align: center;
+  padding: clamp(1rem, 3vw, 2rem);
+}
+
+#attractContent h1 {
+  color: #fff;
+  font-size: clamp(1.5rem, 6vw, 2.8rem);
+  margin-bottom: 0.8rem;
+  text-shadow: 0 0 14px #fff, 0 0 24px #8af;
 }
 
 #attractPrompt {
-  font-size: clamp(0.9rem, 3.5vw, 1.4rem);
+  font-size: clamp(1rem, 3.8vw, 1.5rem);
   animation: blink 1.2s step-end infinite;
-  text-shadow: 0 0 8px #fff;
-}
-
-@keyframes blink {
-  50% { opacity: 0; }
+  text-shadow: 0 0 8px #fff, 0 0 16px #aaf;
+  color: #fff;
 }
 
 #attractSub {
-  margin-top: 1.5rem;
-  font-size: clamp(0.55rem, 2.2vw, 0.9rem);
-  color: #0a0;
+  margin-top: 1.4rem;
+  font-size: clamp(0.7rem, 2.6vw, 1rem);
+  color: #8f8;
   overflow-wrap: anywhere;
-  line-height: 1.4;
+  line-height: 1.45;
   padding: 0 0.5rem;
+}
+
+#attractContent h1, #attractContent p {
+  pointer-events: auto;
 }
 
 #deadOverlay {
@@ -82,7 +120,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: transparent;
+  background: rgba(0, 0, 0, 0.92);
   z-index: 10;
   padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
   cursor: pointer;
@@ -95,8 +133,59 @@ html, body {
 }
 
 #deadContent {
-  visibility: hidden;
-  pointer-events: none;
+  text-align: center;
+  padding: clamp(1.2rem, 4vw, 2.5rem);
+  max-width: min(380px, 90vw);
+}
+
+#deadContent h2 {
+  color: #fff;
+  font-size: clamp(1.3rem, 5vw, 2.4rem);
+  margin-bottom: 0.7rem;
+  text-shadow: 0 0 14px #f33;
+}
+
+#deadContent p {
+  font-family: 'Courier New', Courier, monospace;
+  line-height: 1.5;
+}
+
+#deadContent p[style*="aaddff"], #deadContent > p {
+  color: #cceeFF;
+  font-size: clamp(0.85rem, 3vw, 1.1rem);
+}
+
+#deadContent p[style*="ffcc00"] {
+  color: #ffd748;
+}
+
+#deadContent p[style*="886644"] {
+  color: #ddb055;
+}
+
+#deadContent > p:last-child {
+  color: #ffd748;
+}
+
+#deadContent > p:nth-last-child(2) {
+  color: #fff;
+}
+
+#deadContent p[style*="animation"] {
+  animation: blink 1.2s step-end infinite;
+}
+
+#deadContent p[style*="margin"] {
+  color: #ffd748;
+}
+
+#deadContent h2, #deadContent p {
+  pointer-events: auto;
+}
+
+#attractScreen.hidden ~ #gameCanvas, /* when attract hidden */
+#deadOverlay.hidden ~ #touchControls {
+  pointer-events: auto;
 }
 
 #hud {
@@ -192,7 +281,7 @@ html, body {
   }
 }
 
-/* Portrait-specific: taller touch buttons for narrow screens */
+/* Portrait-specific: taller touch buttons and readable overlay text for narrow screens */
 @media (max-width: 420px) and (orientation: portrait) {
   #touchControls {
     grid-template-rows: 1fr 1.2fr;
@@ -206,5 +295,24 @@ html, body {
   #hud {
     top: calc(var(--safe-top) + 4px);
     right: calc(var(--safe-right) + 4px);
+  }
+  #attractContent h1 {
+    font-size: clamp(1.4rem, 5.8vw, 2.4rem);
+  }
+  #attractPrompt {
+    font-size: clamp(0.95rem, 3.6vw, 1.4rem);
+  }
+  #attractSub {
+    font-size: clamp(0.68rem, 2.5vw, 0.92rem);
+  }
+  #deadContent h2 {
+    font-size: clamp(1.2rem, 4.6vw, 2.0rem);
+  }
+}
+
+/* Landscape/safe-area-aware: ensure overlays respect notch */
+@media (orientation: landscape) and (max-height: 500px) {
+  #attractContent, #deadContent {
+    max-width: 92vw;
   }
 }

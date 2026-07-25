@@ -38,7 +38,7 @@
 
   function playTone(freq, dur, type, vol) {
     if (!audioCtx || muted) return;
-    if (audioCtx.state === 'suspended') { audioCtx.resume(); return; }
+    if (audioCtx.state === 'suspended') { audioCtx.resume(); }
     const o = audioCtx.createOscillator();
     const g = audioCtx.createGain();
     o.type = type || "square";
@@ -55,19 +55,20 @@
      - triangle: soft rumble (thrust)
      - square: bright ping (shoot, shield)
      - sawtooth: aggressive bite (hit, breach, cannon, explosion, death)
+     - sine: melodic arc (victory/level-up, shield regen)
      iPhone-safe: initAudio resumes suspended context; playTone guards against suspend. */
 
   function sfxThrust() { thrustTimer++; if (thrustTimer > 1 && thrustTimer % 8 !== 0) return; playTone(80, 0.04, "triangle", 0.04); }
 
-  function sfxShoot() { playTone(660, 0.06, "square", 0.08); }
+  function sfxShoot() { playTone(660, 0.06, "square", 0.08); if (audioCtx && !muted) { var t = audioCtx.currentTime, o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain(); o2.type = "square"; o2.frequency.setValueAtTime(1200, t); o2.frequency.exponentialRampToValueAtTime(480, t + 0.035); g2.gain.setValueAtTime(0.04, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.06); o2.connect(g2).connect(masterGain); o2.start(t); o2.stop(t + 0.06); } }
 
   function sfxExplosion() { playTone(80, 0.15, "sawtooth", 0.15); playTone(45, 0.25, "square", 0.10); }
 
-  function sfxHit() { playTone(300, 0.04, "square", 0.12); }
+  function sfxHit() { playTone(300, 0.04, "square", 0.12); if (audioCtx && !muted) { var t = audioCtx.currentTime, o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain(); o2.type = "square"; o2.frequency.value = 900; g2.gain.setValueAtTime(0.06, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.025); o2.connect(g2).connect(masterGain); o2.start(t); o2.stop(t + 0.025); } }
 
   function sfxShield() { playTone(1500, 0.04, "square", 0.06); }
 
-  function sfxBreach() { playTone(150, 0.08, "sawtooth", 0.12); playTone(800, 0.03, "square", 0.08); }
+  function sfxBreach() { playTone(150, 0.08, "sawtooth", 0.12); playTone(800, 0.03, "square", 0.08); if (audioCtx && !muted) { var t = audioCtx.currentTime, o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain(); o2.type = "sawtooth"; o2.frequency.setValueAtTime(2400, t); o2.frequency.exponentialRampToValueAtTime(400, t + 0.035); g2.gain.setValueAtTime(0.06, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.04); o2.connect(g2).connect(masterGain); o2.start(t); o2.stop(t + 0.04); } }
 
   function sfxLevelUp() { [523,659,784,1047,1319].forEach((f,i) => setTimeout(() => playTone(f, 0.20, "sine", 0.10), i*70)); }
 
@@ -280,24 +281,30 @@ let state = "attract"; // attract | playing | coreDestruction | dead | levelTran
 /* Idle timeout: after IDLE_TIMEOUT frames of no input during gameplay,
    return to attract mode (cabinet coin-drop behavior). */
 const IDLE_TIMEOUT = 1800; // 30s at 60fps
+const DEAD_PAUSE_FRAMES = 120; // 2s at 60fps — fixed "FREE PLAY" freeze before input accepted
 let idleTimer = 0;
 let score = 0, lives = 3, level = 1;
 let transitionTimer = 0;
 let coreDestructionTimer = 0;
 let debrisSpawned = false;
 let deathTimer = 0;
+let deadPauseTimer = 0; // deterministic freeze before input accepted on dead state
 let deathExplosionX = 0, deathExplosionY = 0;
 let spawnTimer = 0;
 let coreMineTimer = 0;
+let shieldAngle = 0; /* frame-accumulated shield rotation state (deterministic, frame-rate independent) */
 
   /* ── Attract mode: deterministic card rotation ──────── */
   /* Card order: 0=Title, 1=HighScore, 2=Instructions, 3=Showcase
      Durations in frames at 60fps. Total cycle = 900 frames (15s). */
-  const ATTRACT_CARD_DURATIONS = [180, 180, 240, 300];
-  const ATTRACT_TOTAL_CYCLE  = 900;
-  let attractCard       = 0;
-  let attractCardTimer  = 0;
-  let showcaseAngle     = 0;
+const ATTRACT_CARD_DURATIONS = [180, 180, 240, 300];
+const ATTRACT_TOTAL_CYCLE  = 900;
+let attractCard       = 0;
+let attractCardTimer  = 0;
+let showcaseAngle     = 0;
+/* Deterministic attract-frame counter: drives all idle animations without Date.now().
+   This is the basis for cabinet-style deterministic presentation. */
+let attractFrame      = 0;
   let highScore = 0;
   try { highScore = parseInt(localStorage.getItem("sc2_highscore"), 10) || 0; } catch(e) {}
 
@@ -328,13 +335,16 @@ let coreMineTimer = 0;
     insertHighScore(score);
   }
 
-  function resetAttract() {
+function resetAttract() {
     attractCard = 0;
     attractCardTimer = 0;
     showcaseAngle = 0;
-  }
+    attractFrame = 0;
+    setAttractScreenVisible(true);
+}
 
-  function advanceAttractCard() {
+function advanceAttractCard() {
+    attractFrame++;
     attractCardTimer++;
     if (attractCardTimer >= ATTRACT_CARD_DURATIONS[attractCard]) {
       attractCardTimer = 0;
@@ -344,13 +354,13 @@ let coreMineTimer = 0;
     if (attractCard === 3) {
       showcaseAngle += 0.02;
     }
-  }
+}
 
   /* ── Player ─────────────────────────────────────────── */
   const REGEN_ANIM_FRAMES = 40;
 
   const player = {
-    x: 0, y: 0, vx: 0, vy: 0, angle: -Math.PI / 2,
+    x: 0, y: 0, vx: 0, vy: 0, angle: -Math.PI / 2, rotVel: 0,
     thrusting: false,
     rings: [
       { health: 100, destroyed: false, breachFlash: 0 },
@@ -370,6 +380,7 @@ let coreMineTimer = 0;
     player.y = H / 2;
     player.vx = 0; player.vy = 0;
     player.angle = -Math.PI / 2;
+    player.rotVel = 0;
     for (let i = 0; i < SHIELD_RINGS.length; i++) {
       player.rings[i].health = 100;
       player.rings[i].destroyed = false;
@@ -396,8 +407,8 @@ let coreMineTimer = 0;
     const tipY = player.y + Math.sin(player.angle) * 16;
     bullets.push({
       x: tipX, y: tipY,
-      vx: Math.cos(player.angle) * 10 + player.vx * 0.4,
-      vy: Math.sin(player.angle) * 10 + player.vy * 0.4,
+      vx: Math.cos(player.angle) * 10 + player.vx * 0.2,
+      vy: Math.sin(player.angle) * 10 + player.vy * 0.2,
       life: 90,
     });
     sfxShoot();
@@ -409,6 +420,7 @@ let coreMineTimer = 0;
     angle: 0,
     fireCooldown: 0,
     muzzleFlash: 0,
+    locked: false,
     hp: 5, maxHp: 5,
     alive: true,
   };
@@ -420,6 +432,7 @@ let coreMineTimer = 0;
     core.angle = Math.PI / 2;
     core.fireCooldown = 0;
     core.muzzleFlash = 0;
+    core.locked = false;
     core.hp = 3 + level * 2;
     core.maxHp = core.hp;
     core.alive = true;
@@ -493,7 +506,6 @@ let coreMineTimer = 0;
     while (diff < -Math.PI) diff += Math.PI * 2;
     if (Math.abs(diff) > fireAngleTol) return;
 
-    const shieldAngle = Date.now() * shieldRotationSpeed(level);
     if (!findShieldGap(targetAngle, shieldAngle)) return;
 
     core.fireCooldown = cannonFireCooldown(level);
@@ -507,7 +519,12 @@ let coreMineTimer = 0;
     sfxMine();
   }
 
-  /* Update core tracking: rotate toward the player. */
+  /* Update core tracking: rotate toward the player with lock-on preview.
+      The barrel smoothly rotates via coreTurnRate. A "locked" flag triggers when
+      the barrel is within LOCK_TOL of firing alignment (ready to fire if gaps align).
+      This gives the player readable feedback that the cannon is about to fire. */
+  const LOCK_TOL = 0.08;
+
   function updateCore() {
     if (!core.alive) return;
     const targetAngle = angle(core, player);
@@ -520,6 +537,11 @@ let coreMineTimer = 0;
     } else {
       core.angle = targetAngle;
     }
+
+    /* Lock-on preview: barrel is "locked" when within LOCK_TOL (2x fireAngleTol)
+       of the target angle. Signals imminent firing when gaps align. */
+    core.locked = Math.abs(diff) <= LOCK_TOL;
+
     if (core.fireCooldown > 0) core.fireCooldown--;
     if (core.muzzleFlash > 0) core.muzzleFlash--;
     fireCannonShot();
@@ -662,7 +684,7 @@ let coreMineTimer = 0;
   let stars = [];
   regenerateStars();
 
-  /* ── Level transition ───────────────────────────────── */
+  /* ── Level transition / end-game helpers ─────────────── */
   function startLevel() {
     level++;
     state = "levelTransition";
@@ -670,6 +692,17 @@ let coreMineTimer = 0;
     sfxLevelUp();
     /* Core reset deferred to levelTransition->playing handler;
        keeps core hidden during transition screen. */
+  }
+
+  /* End-game: deterministic freeze-then-input sequence.
+     Freezes all gameplay for DEAD_PAUSE_FRAMES frames, then unlocks input
+     (same as cabinet "FREE PLAY" freeze before accepting coin-drop). */
+  function endGame() {
+    state = "dead";
+    deadPauseTimer = DEAD_PAUSE_FRAMES;
+    deadFrame = 0;
+    saveHighScore();
+    populateDeadOverlay();
   }
 
   /* ── Collision helpers ─────────────────────────────── */
@@ -695,7 +728,6 @@ let coreMineTimer = 0;
     const d = Math.hypot(dx, dy);
     let relAngle = Math.atan2(dy, dx);
     if (relAngle < 0) relAngle += Math.PI * 2;
-    const shieldAngle = Date.now() * shieldRotationSpeed(level);
     const inRegenAnim = player.regenAnimFrames > 0 && player.regenCollRadii;
     for (let ri = SHIELD_RINGS.length - 1; ri >= 0; ri--) {
       const ring = SHIELD_RINGS[ri];
@@ -814,15 +846,18 @@ let coreMineTimer = 0;
           idleTimer = 0;
           state = "playing";
         } else {
-          saveHighScore();
-          state = "dead";
-          populateDeadOverlay();
+          endGame();
         }
       }
       return;
     }
 
     if (state !== "playing") return;
+
+    /* Advance shield rotation state per frame — deterministic, frame-rate independent.
+        Original Star Castle cabinet used fixed per-frame angular step for shield rings;
+        Date.now() timestamps make the gameplay non-deterministic and FPS-dependent. */
+    shieldAngle += shieldRotationSpeed(level);
 
     /* Idle timeout: increment on every playing frame; reset on any input.
         After IDLE_TIMEOUT frames with no input, return to attract mode. */
@@ -838,9 +873,20 @@ let coreMineTimer = 0;
       return;
     }
 
-    /* Player rotation — tighter turn for precision positioning (cabinet-era feel) */
+    /* Player rotation — Asteroids-era inertia (acceleration + friction) */
     const rotSpeed = 0.065;
-    if (rotDir() !== 0) player.angle += rotDir() * rotSpeed;
+    const ROT_ACCEL  = 0.012;   // rad/frame² when turning (builds rotational momentum)
+    const ROT_FRICTION = 0.85;  // rad/frame decay factor on release (cabinet-era drift)
+
+    if (rotDir() !== 0) {
+      player.rotVel += rotDir() * ROT_ACCEL;
+      if (player.rotVel >  rotSpeed) player.rotVel =  rotSpeed;
+      if (player.rotVel < -rotSpeed) player.rotVel = -rotSpeed;
+    } else {
+      player.rotVel *= ROT_FRICTION;
+      if (Math.abs(player.rotVel) < 0.001) player.rotVel = 0;
+    }
+    player.angle += player.rotVel;
 
     /* Thrust — punchier acceleration for responsive control */
     const thrust = 0.18;
@@ -1236,8 +1282,8 @@ let coreMineTimer = 0;
     }
 
     /* Cabinet-authentic start prompt: INSERT COIN + PRESS START
-        Dual-line prompt with distinct blink phases. */
-    const promptBlink = Math.sin(Date.now() * 0.004) * 0.5 + 0.5;
+        Dual-line prompt with distinct blink phases — deterministic, frame-driven. */
+    const promptBlink = Math.sin((attractFrame / 60) * Math.PI * 2) * 0.5 + 0.5;
     attractPrompt.style.opacity = promptBlink;
 
     const promptSize = Math.floor(W * 0.03);
@@ -1302,6 +1348,9 @@ let coreMineTimer = 0;
     const lineH = Math.floor(W * 0.048);
     const tableStartY = H * 0.36;
 
+    /* Cabinet-style: pad scores to 6 digits for consistent column width */
+    const scoreFmt = s => String(s).padStart(6, "0");
+
     for (let i = 0; i < HIGH_SCORE_SLOTS; i++) {
       const y = tableStartY + i * lineH;
       if (i < highScoreTable.length) {
@@ -1314,7 +1363,7 @@ let coreMineTimer = 0;
           noGlow();
           ctx.font = `bold ${entrySize}px "Courier New", monospace`;
         }
-        ctx.fillText(`${i + 1}. ${highScoreTable[i]}`, W / 2, y);
+        ctx.fillText(`${i + 1}. ${scoreFmt(highScoreTable[i])}`, W / 2, y);
       } else {
         ctx.fillStyle = "#334455";
         noGlow();
@@ -1424,13 +1473,14 @@ let coreMineTimer = 0;
     }
     noGlow();
 
-    /* Orbiting core mines — pulsing beacon circles with bloom */
+    /* Orbiting core mines — pulsing beacon circles with bloom (deterministic pulse) */
     for (let mi = 0; mi < 3; mi++) {
       const mA = showcaseAngle * 0.8 + (mi / 3) * Math.PI * 2;
       const mR = 80;
       const mx = cx + Math.cos(mA) * mR;
       const my = cy + Math.sin(mA) * mR;
-      const pulse = 0.7 + 0.3 * Math.sin(Date.now() * 0.008 + mi * 2);
+      /* Deterministic pulse driven by attractFrame, phase-offset per mine */
+      const pulse = 0.7 + 0.3 * Math.sin((attractFrame / 60) * Math.PI * 2 + (mi * 2.1));
       const beaconR = 10 * pulse;
 
       /* Ghost-line bloom */
@@ -1676,11 +1726,12 @@ let coreMineTimer = 0;
     }
 
     ctx.font = `bold ${Math.floor(W * 0.022)}px "Courier New", monospace`;
-    ctx.fillStyle = "#886644";
+    ctx.fillStyle = "#88644";
     ctx.fillText(`HIGH SCORE: ${highScore}`, W / 2, H * 0.63);
 
-    const promptBlink = Math.sin(Date.now() * 0.004) * 0.5 + 0.5;
-    attractPrompt.style.opacity = promptBlink;
+    deadFrame = (deadFrame || 0) + 1;
+    const promptBlink = Math.sin(deadFrame * 0.08) * 0.5 + 0.5;
+    if (attractPrompt) attractPrompt.style.opacity = promptBlink;
 
     ctx.font = `bold ${Math.floor(W * 0.028)}px "Courier New", monospace`;
     ctx.textAlign = "center";
@@ -1706,6 +1757,7 @@ let coreMineTimer = 0;
       attractScreen.classList.remove("hidden");
     }
   }
+  // ── Pass 9: iPhone portrait playability & reliability
 
   /* ── Public API ─────────────────────────────────────── */
 
@@ -1733,6 +1785,15 @@ let coreMineTimer = 0;
       deadOverlay.classList.remove("hidden");
     } else {
       deadOverlay.classList.add("hidden");
+    }
+  }
+
+  /* ── Attract screen HTML overlay (mobile readable text) ─────── */
+  function setAttractScreenVisible(visible) {
+    if (visible) {
+      attractScreen.classList.remove("hidden");
+    } else {
+      attractScreen.classList.add("hidden");
     }
   }
 
@@ -1788,12 +1849,13 @@ let coreMineTimer = 0;
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, W, H);
 
-    /* Stars — dim, subtle, no competition with vector lines
-       Uses globalAlpha to avoid per-star string allocation each frame. */
-    ctx.fillStyle = "rgba(80, 90, 120, 1)";
+    /* Stars — barely visible, no competition with vector lines.
+       Pure white at sub-5% alpha; authentic vector cabinets had no starfield,
+       so this is kept to a whisper behind the phosphor artwork. */
     for (const s of stars) {
       const twinkle = 0.3 + Math.sin(Date.now() * 0.002 + s.b * 10) * 0.3;
-      ctx.globalAlpha = twinkle * 0.4;
+      ctx.fillStyle = "rgba(255, 255, 255, 1)";
+      ctx.globalAlpha = twinkle * 0.04;
       ctx.fillRect(s.x, s.y, s.s, s.s);
     }
     ctx.globalAlpha = 1;
@@ -1829,8 +1891,8 @@ let coreMineTimer = 0;
     if (state === "coreDestruction") {
       /* Flash overlay on entry */
       if (coreDestructionTimer > 75) {
-        const flashAlpha = (coreDestructionTimer - 75) / 15 * 0.25;
-        ctx.fillStyle = `rgba(255, 200, 100, ${flashAlpha})`;
+        const flashAlpha = (coreDestructionTimer - 75) / 15 * 0.2;
+        ctx.fillStyle = `rgba(255, 255, 250, ${flashAlpha})`;
         ctx.fillRect(0, 0, W, H);
       }
 
@@ -1874,6 +1936,19 @@ let coreMineTimer = 0;
     }
 
     if (state === "dead") {
+      /* Deterministic freeze: during DEAD_PAUSE_FRAMES frames, reject all input.
+         Only after the pause elapses does "INSERT COIN / TAP" accept a restart.
+         This matches the cabinet's fixed-duration dead-screen freeze. */
+      if (deadPauseTimer > 0) {
+        deadPauseTimer--;
+      } else if (keys.Space || keys.Enter || touchFireOn || canvasTapped) {
+        /* INPUT ACCEPTED — transition to attract mode */
+        canvasTapped = false;
+        resetAttract();
+        state = "attract";
+        setHUDVisible(false);
+        setDeadOverlayVisible(false);
+      }
       drawDead();
       return;
     }
@@ -1887,9 +1962,8 @@ let coreMineTimer = 0;
        Outer ring glows brightest (intensity 0.95, glow 14), inner ring is dimmest
        (intensity 0.30, glow 6) so the player reads "outer = primary defense" at a glance.
        Gap ticks mark each arc endpoint so breaches are visible even during rapid rotation. */
-    if (player.alive) {
-      const shieldAngle = Date.now() * shieldRotationSpeed(level);
-      const inRegenAnim = player.regenAnimFrames > 0;
+     if (player.alive) {
+       const inRegenAnim = player.regenAnimFrames > 0;
       const regenT = inRegenAnim ? 1 - player.regenAnimFrames / REGEN_ANIM_FRAMES : 1;
       for (let ri = 0; ri < SHIELD_RINGS.length; ri++) {
         const ring = SHIELD_RINGS[ri];
@@ -2008,10 +2082,9 @@ let coreMineTimer = 0;
        Barrel rotation uses core.angle (actual cannon position) not direct aimAngle,
        matching the original Star Castle where the turret visibly sweeps toward the ship.
        A tracking line from barrel tip to player shows shot intent when aligned. */
-    if (core.alive) {
-      const aimAngle = angle(core, player);
-      const shieldAngle = Date.now() * shieldRotationSpeed(level);
-      /* Gap check uses core's actual pointing direction (what the barrel shows) */
+     if (core.alive) {
+       const aimAngle = angle(core, player);
+       /* Gap check uses core's actual pointing direction (what the barrel shows) */
       const barrelGapAligned = findShieldGap(core.angle, shieldAngle);
       /* Also check if a direct shot at player would go through gaps */
       const aimGapAligned = findShieldGap(aimAngle, shieldAngle);
@@ -2106,14 +2179,24 @@ let coreMineTimer = 0;
       ctx.lineTo(16, 0);
       ctx.stroke();
 
-      /* Center crosshair: color indicates barrel alignment with gaps */
-      ctx.strokeStyle = barrelGapAligned ? "#ffff33" : "#33ff33";
-      ctx.shadowColor = barrelGapAligned ? "#ffff00" : "#22ff22";
-      ctx.shadowBlur = 3;
-      ctx.lineWidth = 1.5;
+      /* Center crosshair: color and size indicate barrel alignment with gaps.
+         When locked (barrel within 2x fireAngleTol of player), crosshair is bright
+         and outlines the imminent firing zone for readable cue. */
+      const crossReady = core.locked && barrelGapAligned;
+      ctx.strokeStyle = crossReady ? "#ffff00" : (barrelGapAligned ? "#ffff33" : "#33ff33");
+      ctx.shadowColor = crossReady ? "#ffff00" : (barrelGapAligned ? "#ffff00" : "#22ff22");
+      ctx.shadowBlur = crossReady ? 6 : 3;
+      ctx.lineWidth = crossReady ? 2 : 1.5;
+      const chR = crossReady ? 6 : 4;
       ctx.beginPath();
-      ctx.moveTo(-4, 0); ctx.lineTo(4, 0);
-      ctx.moveTo(0, -4); ctx.lineTo(0, 4);
+      ctx.moveTo(0, -chR); ctx.lineTo(0, chR);
+      ctx.moveTo(-chR, 0); ctx.lineTo(chR, 0);
+      if (crossReady) {
+        /* Outer ring when locked-on: signals imminent firing window */
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(0, 0, chR + 1.5, 0, Math.PI * 2);
+      }
       ctx.stroke();
 
       /* Cannon barrel: rectangular outline, rotated to core.angle (smooth tracking)
@@ -2122,26 +2205,33 @@ let coreMineTimer = 0;
       ctx.save();
       ctx.rotate(core.angle);
       /* Barrel ghost-line for bloom */
-      ctx.strokeStyle = "#33ff33";
+      const barrelAlpha = crossReady ? 0.3 : 0.15;
+      ctx.strokeStyle = crossReady ? "#ffffaa" : "#33ff33";
       ctx.lineWidth = 3;
-      ctx.shadowColor = "#33ff33";
-      ctx.shadowBlur = 10;
-      ctx.globalAlpha = 0.15;
+      ctx.shadowColor = crossReady ? "#ffff00" : "#33ff33";
+      ctx.shadowBlur = crossReady ? 14 : 10;
+      ctx.globalAlpha = barrelAlpha;
       ctx.strokeRect(8, -2, 16, 4);
       ctx.globalAlpha = 1;
       /* Primary barrel wireframe */
-      ctx.strokeStyle = "#33ff33";
+      ctx.strokeStyle = crossReady ? "#ffff66" : "#33ff33";
       ctx.lineWidth = 1.5;
-      ctx.shadowColor = "#22ff22";
-      ctx.shadowBlur = 3;
-      ctx.strokeRect(8, -2, 16, 4);
-      /* Barrel muzzle detail — small circle at tip */
-      ctx.strokeStyle = "#44ff44";
-      ctx.lineWidth = 1;
-      ctx.shadowColor = "#44ff44";
-      ctx.shadowBlur = 4;
+      ctx.shadowColor = crossReady ? "#ffff44" : "#22ff22";
+      ctx.shadowBlur = crossReady ? 5 : 3;
+      /* Barrel: rectangular body with directional arrow tip for clear direction read */
       ctx.beginPath();
-      ctx.arc(24, 0, 2, 0, Math.PI * 2);
+      ctx.moveTo(8, -2);
+      ctx.lineTo(24, 0);         // converges to muzzle tip
+      ctx.lineTo(8, 2);
+      ctx.closePath();
+      ctx.stroke();
+      /* Barrel muzzle detail — small circle at tip */
+      ctx.strokeStyle = crossReady ? "#ffffff" : "#44ff44";
+      ctx.lineWidth = 1;
+      ctx.shadowColor = crossReady ? "#ffffff" : "#44ff44";
+      ctx.shadowBlur = crossReady ? 6 : 4;
+      ctx.beginPath();
+      ctx.arc(24, 0, crossReady ? 2.5 : 2, 0, Math.PI * 2);
       ctx.stroke();
       /* Muzzle flash: bright burst when cannon fires (6 frames)
          Original Star Castle showed a brief flash at barrel exit. */
@@ -2171,21 +2261,35 @@ let coreMineTimer = 0;
 
       /* Tracking line: faint dashed line from barrel tip toward player
          Shows where the cannon is actually pointing vs. where player is.
-         Original Star Castle used a visible sight line. */
+         Original Star Castle used a visible sight line. When locked-on,
+         the tracking line extends further and uses brighter phosphor to signal
+         an imminent firing window (barrel within fireAngleTol, all ring gaps aligned). */
       const barrelTipX = Math.cos(core.angle) * 24;
       const barrelTipY = Math.sin(core.angle) * 24;
+      /* Extend tracking line to player position when locked (full fire path visible).
+         When tracking, extend just a bit toward the player angle for guidance. */
+      const trackExt = crossReady ? 280 : (core.locked ? 160 : 80);
       const playerRelX = player.x - core.x;
       const playerRelY = player.y - core.y;
-      const trackAlpha = barrelGapAligned ? 0.35 : 0.15;
-      ctx.strokeStyle = barrelGapAligned ? "#ffff33" : "#33ff33";
-      ctx.lineWidth = 1;
-      ctx.shadowColor = barrelGapAligned ? "#ffff00" : "#22ff22";
-      ctx.shadowBlur = barrelGapAligned ? 6 : 2;
+      const distToPlayer = Math.hypot(playerRelX, playerRelY);
+      /* Clamp draw length to actual distance or max extension */
+      const drawScale = Math.max(1, distToPlayer / trackExt);
+      const extX = barrelTipX + playerRelX * (drawScale >= 1 ? 1 : distToPlayer / trackExt);
+      const extY = barrelTipY + playerRelY * (drawScale >= 1 ? 1 : distToPlayer / trackExt);
+      const trackAlpha = crossReady ? 0.5 : (core.locked ? 0.35 : 0.15);
+      /* Line color: bright yellow when locked+gaps, amber when just locked, green otherwise */
+      const trackColor = crossReady ? "#ffff44" : (core.locked ? "#ffcc33" : "#33ff33");
+      const trackGlow = crossReady ? 8 : (core.locked ? 5 : 2);
+      ctx.strokeStyle = trackColor;
+      ctx.lineWidth = crossReady ? 1.5 : 1;
+      ctx.shadowColor = crossReady ? "#ffff00" : (core.locked ? "#ff8800" : "#22ff22");
+      ctx.shadowBlur = trackGlow;
       ctx.globalAlpha = trackAlpha;
-      ctx.setLineDash([4, 4]);
+      ctx.setLineDash(crossReady ? [] : [4, 4]);
+      /* Dashed when tracking, solid when locked (ready to fire). */
       ctx.beginPath();
       ctx.moveTo(barrelTipX, barrelTipY);
-      ctx.lineTo(playerRelX, playerRelY);
+      ctx.lineTo(extX, extY);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
@@ -2194,7 +2298,8 @@ let coreMineTimer = 0;
       ctx.restore();
     }
 
-    /* Cannon shots — bright warm phosphor, high visibility threat indicator */
+    /* Cannon shots — bright warm phosphor, high visibility threat indicator.
+       Direction arrow at head for clear trajectory read on vector display. */
     for (const c of cannonShots) {
       /* Ghost-line bloom for threat presence */
       ctx.strokeStyle = "#ff8844";
@@ -2203,8 +2308,17 @@ let coreMineTimer = 0;
       ctx.shadowBlur = 14;
       ctx.globalAlpha = 0.2;
       ctx.beginPath();
-      ctx.moveTo(c.x - c.vx * 1.5, c.y - c.vy * 1.5);
-      ctx.lineTo(c.x + c.vx * 0.5, c.y + c.vy * 0.5);
+      const speed = Math.hypot(c.vx, c.vy);
+      if (speed > 0) {
+        /* Normalize velocity for trail calculations */
+        const nvx = c.vx / speed;
+        const nvy = c.vy / speed;
+        ctx.moveTo(c.x - nvx * 12, c.y - nvy * 12);
+        ctx.lineTo(c.x + nvx * 4, c.y + nvy * 4);
+      } else {
+        ctx.moveTo(c.x, c.y);
+        ctx.lineTo(c.x + 4, c.y);
+      }
       ctx.stroke();
       ctx.globalAlpha = 1;
       /* Primary phosphor: bright, crisp streak */
@@ -2213,9 +2327,45 @@ let coreMineTimer = 0;
       ctx.shadowColor = "#ff6622";
       ctx.shadowBlur = 8;
       ctx.beginPath();
-      ctx.moveTo(c.x - c.vx, c.y - c.vy);
-      ctx.lineTo(c.x, c.y);
+      if (speed > 0) {
+        const nvx = c.vx / speed;
+        const nvy = c.vy / speed;
+        ctx.moveTo(c.x - nvx * 8, c.y - nvy * 8);
+        ctx.lineTo(c.x + nvx * 2, c.y + nvy * 2);
+      } else {
+        ctx.moveTo(c.x, c.y);
+        ctx.lineTo(c.x + 2, c.y);
+      }
       ctx.stroke();
+
+      /* Directional arrowhead at shot head: small vector triangle showing trajectory
+         Core Star Castle fidelity: cannon shots have clear directional indicators. */
+      if (speed > 0) {
+        const arrowSize = Math.min(5, speed * 0.6);
+        /* Arrowhead pointing in velocity direction */
+        const ax = c.vx / speed;
+        const ay = c.vy / speed;
+        /* Perpendicular: (-ay, ax) */
+        const px = -ay;
+        const py = ax;
+        /* Arrowhead: V-shape at shot head position */
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1;
+        ctx.shadowColor = "#ffcc88";
+        ctx.shadowBlur = 5;
+        ctx.beginPath();
+        /* Tip of arrow at current shot position */
+        ctx.moveTo(c.x, c.y);
+        /* Left wing of V */
+        ctx.lineTo(c.x - ax * arrowSize + px * arrowSize * 0.5,
+                   c.y - ay * arrowSize + py * arrowSize * 0.5);
+        /* Right wing of V */
+        ctx.lineTo(c.x - ax * arrowSize - px * arrowSize * 0.5,
+                   c.y - ay * arrowSize - py * arrowSize * 0.5);
+        ctx.closePath();
+        ctx.stroke();
+      }
+
       /* Hot core dot */
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 1;
