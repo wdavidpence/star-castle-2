@@ -213,6 +213,11 @@
       }
     });
 
+    /* Desktop mouse pointer: click on attract overlay starts the game (V17a) */
+    if (attractScreen) {
+      attractScreen.addEventListener("click", () => { initAudio(); canvasTapped = true; });
+    }
+
     /* Dead overlay div: tap anywhere to restart */
     if (deadOverlay) {
       deadOverlay.addEventListener("touchstart", e => {

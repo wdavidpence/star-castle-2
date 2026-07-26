@@ -3929,6 +3929,9 @@ const deadBlock = deadHandler;
 const restartIdx = deadBlock.indexOf("resetAttract()");
 assert(restartIdx > deadBlock.indexOf("deadPauseTimer--"), 'CN24g: resetAttract()/restart is BELOW the deadPauseTimer decrement (order guaranteed)');
 
+/* V17a: Attract overlay click listener must exist for desktop/mouse pointer. */
+assert(!!js.match(/attractScreen\s*\.\s*addEventListener.*click/), 'V17a: attract screen click listener wired');
+
 // ── Result ──
 if (failed === 0) {
   console.log('PASS');
