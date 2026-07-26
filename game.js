@@ -196,6 +196,14 @@
       }
     });
 
+    /* iOS Safari: register touchstart on the canvas so tap gestures don't trigger browser chrome (address bar, double-tap zoom). */
+    canvas.addEventListener("touchstart", e => {
+      if (state === "attract" || state === "dead") {
+        e.preventDefault();
+        initAudio();
+      }
+    }, { passive: false });
+
     /* Attract screen div: tap anywhere to start */
     attractScreen.addEventListener("touchstart", e => {
       if (state === "attract") {

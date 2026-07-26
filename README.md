@@ -81,6 +81,48 @@ Validates JavaScript syntax.
 | `test-smoke.js` | Smoke test suite with deterministic simulations |
 | `package.json` | Project metadata and npm scripts |
 
+# Infrastructure: scorecard.js & supervisor.sh
+
+### scorecard.js — automated quality-gate runner
+
+```bash
+node scorecard.js
+```
+
+- Generates/updates `STATE.json` (top-level keys: project, target_description,
+  overall_score, checklist, last_test_report, last_commit, next_action,
+  pass_count, judge_review_due).
+- Starts a tiny HTTP server on an **ephemeral port** (never 8080) and runs the
+  same Playwright-based gate suite used by `npm test`.
+- If the Playwright module cannot be imported, gates fail **and** the report
+  explicitly states why — never silently passing.
+
+### supervisor.sh — autonomous loop (bash)
+
+```bash
+chmod +x supervisor.sh
+./supervisor.sh                            # default: indefinite loop, BATCH_SIZE=8
+./supervisor.sh --once                     # single iteration, exit 0/1
+```
+
+- **Gates** before any commit: `scorecard.js` → `npm test` → `git diff --check`.
+- **Lockfile** (`supervisor.lock`) prevents concurrent runs; stale locks from
+  dead processes are auto-reclaimed.
+- **`judge_decision.json`** contract: `{ "action": "continue"|"redirect"|"done" }`.
+  The loop stops at `BATCH_SIZE` boundary and waits for a judge decision.
+- **OpenCode serve** is used only when `opencode` exists on `$PATH`; otherwise
+  the supervisor falls back to a minimal no-attach headless HTTP server with an
+  explicit log message.  No fake flags or permission bypasses are invented.
+
+### Limitations (documented, not worked around)
+
+| Capability                 | Status                                   |
+|----------------------------|------------------------------------------|
+| `npm test` (CLI)           | Working when Playwright module is installed.  |
+| `opencode serve`/`attach`  | Only when the CLI is on PATH. Otherwise a minimal HTTP server is started with **no attach** capability; the limitation is logged, never faked.  |
+| Browser launch (Playwright)| Fails explicitly if the Playwright module is not importable; `last_test_report.available` and `.error` describe why.  |
+| `~/.hermes/LOOP_DOCTRINE.md` write | Blocked by file-system permissions; this is a known limitation and the supervisor does not attempt to bypass it.  |
+
 ## License
 
 MIT

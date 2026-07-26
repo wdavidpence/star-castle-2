@@ -82,6 +82,7 @@ let playwrightUnavailableReason = "";
 
 try {
   require.resolve("playwright");
+  hasPlaywright = true;
 } catch (_) {
   hasPlaywright = false;
   playwrightUnavailableReason = "playwright Node module is not installed (require.resolve failed). npx binary may exist but cannot be loaded by this script.";
@@ -128,6 +129,7 @@ function startLocalServer() {
 
 async function runPlaywrightHarness(serverUrl) {
   let browser = null;
+  let report = null;
   try {
     const pw = require("playwright");
     browser = await pw.chromium.launch({ headless: true });
@@ -146,7 +148,7 @@ async function runPlaywrightHarness(serverUrl) {
 
     await page.goto(serverUrl, { waitUntil: "networkidle", timeout: 15000 });
 
-    const report = {
+      report = {
       timestamp: utcNow(),
       server_url: serverUrl,
       playwright_version: "detected",
@@ -327,7 +329,7 @@ async function runPlaywrightHarness(serverUrl) {
     await browser.close();
   } catch (e) {
     if (browser) { try { await browser.close(); } catch (_) {} }
-    return { error: e.message, status: "error", available: hasPlaywright, error_status: "browser_launch_failed" };
+    report = { error: e.message, status: "error", available: hasPlaywright, error_status: "browser_launch_failed" };
   }
 
   return report;

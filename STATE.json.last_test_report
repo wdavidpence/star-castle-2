@@ -1,0 +1,45 @@
+{
+  "timestamp": "2026-07-26T13:52:51.692Z",
+  "server_url": "http://127.0.0.1:64110/index.html",
+  "playwright_version": "detected",
+  "gates": {
+    "runtime_load": "pass",
+    "core_gameplay": "pass",
+    "controls": "pass",
+    "audio": "fail",
+    "mobile": "pass",
+    "shield_rings": "pass",
+    "enemies": "pass",
+    "transitions_scoring": "pass",
+    "vector_presentation": "pass",
+    "documentation": "pass",
+    "stability": "pass"
+  },
+  "console_errors": [],
+  "unhandled_rejections": [],
+  "canvas": {
+    "width": 1280,
+    "height": 720,
+    "non_background_pixels": 90751
+  },
+  "timing": {
+    "frames_logged": 0,
+    "frame_rate_avg": 0
+  },
+  "entities": {
+    "state": "playing"
+  },
+  "inputs_sent": 5,
+  "audio_checked": false,
+  "visual_checks": [
+    {
+      "name": "attract_prompt_text",
+      "value": "PRESS START OR TAP TO PLAY"
+    },
+    {
+      "name": "state_probe_error",
+      "value": "page.evaluate: ReferenceError: player is not defined\n    at eval (eval at evaluate (:311:30), <anonymous>:1:29)\n    at UtilityScript.evaluate (<anonymous>:313:16)\n    at UtilityScript.<anonymous> (<anonymous>:1:44)"
+    }
+  ],
+  "available": true
+}

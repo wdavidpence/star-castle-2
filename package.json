@@ -5,7 +5,9 @@
   "main": "game.js",
   "scripts": {
     "test": "node test-smoke.js",
-    "check": "node --check game.js"
+    "check": "node --check game.js",
+    "scorecard": "node scorecard.js",
+    "supervisor:once": "bash supervisor.sh --once"
   },
   "keywords": ["game", "browser", "canvas", "vector", "star-castle"],
   "license": "MIT"

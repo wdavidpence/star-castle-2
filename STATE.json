@@ -1,24 +1,112 @@
 {
   "project": "star-castle-2",
   "target_description": "A vector-style browser recreation of the 1980 Cinematronics Star Castle arcade game with shield rings, enemy types, Web Audio API sound effects, and mobile touch controls.",
-  "overall_score": 0,
-  "last_test_report": {},
-  "next_action": "initial_setup_complete_waiting_for_first_loop_pass",
+  "overall_score": 9.1,
+  "last_test_report": {
+    "timestamp": "2026-07-26T13:52:51.692Z",
+    "server_url": "http://127.0.0.1:64110/index.html",
+    "playwright_version": "detected",
+    "gates": {
+      "runtime_load": "pass",
+      "core_gameplay": "pass",
+      "controls": "pass",
+      "audio": "fail",
+      "mobile": "pass",
+      "shield_rings": "pass",
+      "enemies": "pass",
+      "transitions_scoring": "pass",
+      "vector_presentation": "pass",
+      "documentation": "pass",
+      "stability": "pass"
+    },
+    "console_errors": [],
+    "unhandled_rejections": [],
+    "canvas": {
+      "width": 1280,
+      "height": 720,
+      "non_background_pixels": 90751
+    },
+    "timing": {
+      "frames_logged": 0,
+      "frame_rate_avg": 0
+    },
+    "entities": {
+      "state": "playing"
+    },
+    "inputs_sent": 5,
+    "audio_checked": false,
+    "visual_checks": [
+      {
+        "name": "attract_prompt_text",
+        "value": "PRESS START OR TAP TO PLAY"
+      },
+      {
+        "name": "state_probe_error",
+        "value": "page.evaluate: ReferenceError: player is not defined\n    at eval (eval at evaluate (:311:30), <anonymous>:1:29)\n    at UtilityScript.evaluate (<anonymous>:313:16)\n    at UtilityScript.<anonymous> (<anonymous>:1:44)"
+      }
+    ],
+    "available": true
+  },
+  "next_action": "fix_failed_gates",
   "pass_count": 0,
   "judge_review_due": false,
   "last_commit": "",
   "checklist": [
-    { "item": "runtime_load", "score": 0, "notes": "" },
-    { "item": "core_gameplay", "score": 0, "notes": "" },
-    { "item": "shield_rings", "score": 0, "notes": "" },
-    { "item": "controls", "score": 0, "notes": "" },
-    { "item": "enemies", "score": 0, "notes": "" },
-    { "item": "transitions_scoring", "score": 0, "notes": "" },
-    { "item": "vector_presentation", "score": 0, "notes": "" },
-    { "item": "audio", "score": 0, "notes": "" },
-    { "item": "mobile", "score": 0, "notes": "" },
-    { "item": "stability", "score": 0, "notes": "" },
-    { "item": "documentation", "score": 0, "notes": "" }
+    {
+      "item": "runtime_load",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "core_gameplay",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "shield_rings",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "controls",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "enemies",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "transitions_scoring",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "vector_presentation",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "audio",
+      "score": 0,
+      "notes": " [FAIL]  [FAIL]  [FAIL]  [FAIL] "
+    },
+    {
+      "item": "mobile",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "stability",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    },
+    {
+      "item": "documentation",
+      "score": 10,
+      "notes": " [FAIL]  [FAIL]  [PASS]  [PASS] "
+    }
   ],
   "_metadata": {
     "last_updated": "2026-07-25T00:00:00.000Z",
