@@ -218,11 +218,17 @@
       attractScreen.addEventListener("click", () => { initAudio(); canvasTapped = true; });
     }
 
-    /* Dead overlay div: tap anywhere to restart */
+    /* Dead overlay div: tap anywhere / click to restart */
     if (deadOverlay) {
       deadOverlay.addEventListener("touchstart", e => {
         if (state === "dead") {
           e.preventDefault();
+          initAudio();
+          canvasTapped = true;
+        }
+      });
+      deadOverlay.addEventListener("click", e => {
+        if (state === "dead") {
           initAudio();
           canvasTapped = true;
         }
