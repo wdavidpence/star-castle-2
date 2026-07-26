@@ -165,6 +165,25 @@
       const tid = getTouchId(e);
       setTouch(id, false, tid);
     });
+
+    /* Pointer Events fallback for non-touch pointers (mice, stylus on tablets in desktop mode). */
+    el.addEventListener("pointerdown", e => {
+      if (e.pointerType === "touch") return;
+      e.preventDefault();
+      setTouch(id, true, e.pointerId);
+      initAudio();
+      if (state === "playing") idleTimer = 0;
+    });
+    el.addEventListener("pointerup", e => {
+      if (e.pointerType === "touch") return;
+      e.preventDefault();
+      setTouch(id, false, e.pointerId);
+    });
+    el.addEventListener("pointercancel", e => {
+      if (e.pointerType === "touch") return;
+      e.preventDefault();
+      setTouch(id, false, e.pointerId);
+    });
   }
 
   let inputInitialized = false;

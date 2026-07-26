@@ -3319,6 +3319,13 @@ assert(js.match(/getTouchId[\s\S]*?changedTouches/s), 'M27-34b: getTouchId reads
 const bindTouchDef = js.substring(js.indexOf('function bindTouch('));
 assert(bindTouchDef.includes('getTouchId'), 'M27-35: bindTouch calls getTouchId');
 
+/* M27-35b: Pointer Events fallback for non-touch pointers, ignoring touch */
+assert(bindTouchDef.includes('pointerdown'), 'M27-35b: bindTouch registers pointerdown');
+assert(bindTouchDef.includes('pointerup'), 'M27-35c: bindTouch registers pointerup');
+assert(bindTouchDef.includes('pointercancel'), 'M27-35d: bindTouch registers pointercancel');
+assert(bindTouchDef.includes('e.pointerType === "touch"'), 'M27-35e: bindTouch ignores touch pointerType');
+assert(bindTouchDef.includes('e.pointerId'), 'M27-35f: bindTouch uses e.pointerId for non-touch pointers');
+
 /* M27-36: Held fire — touchFireOn persists across frames */
 // touchFireOn is set on touchstart, cleared on touchend — fireBullet checks every frame
 assert(js.includes('if (fireDir()) fireBullet()'), 'M27-36: fireBullet called every frame (held fire)');
