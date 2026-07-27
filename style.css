@@ -107,6 +107,17 @@ html, body {
   color: #8f8;
   overflow-wrap: anywhere;
   line-height: 1.45;
+}
+
+#attractTouchHint {
+  margin-top: 0.8rem;
+  font-size: clamp(0.65rem, 2.3vw, 0.88rem);
+  color: #6a6;
+  line-height: 1.35;
+  max-width: 90vw;
+  margin-left: auto;
+  margin-right: auto;
+}
   padding: 0 0.5rem;
 }
 
@@ -223,6 +234,14 @@ html, body {
   background: rgba(0, 255, 0, 0.3);
 }
 
+/* Mute button pressed state: visual feedback while held via pointer events.
+    Distinct from :active (browser-generated) and .active (programmatic toggle). */
+.hud-btn.pressed {
+  background: rgba(0, 255, 0, 0.4);
+  border-color: #0f0;
+  box-shadow: 0 0 8px rgba(0, 255, 0, 0.4);
+}
+
 #touchControls {
   position: fixed;
   bottom: var(--safe-bottom);
@@ -304,6 +323,10 @@ html, body {
   }
   #attractSub {
     font-size: clamp(0.68rem, 2.5vw, 0.92rem);
+  }
+  #attractTouchHint {
+    font-size: clamp(0.6rem, 2.2vw, 0.82rem);
+    margin-top: 0.5rem;
   }
   #deadContent h2 {
     font-size: clamp(1.2rem, 4.6vw, 2.0rem);

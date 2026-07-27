@@ -21,6 +21,15 @@
   const touchRight    = document.getElementById("touchRight");
   const touchFire     = document.getElementById("touchFire");
 
+  /* Accessibility: make touch controls and mute button discoverable to
+      screen readers and keyboard navigation. Each gets role=button, tabindex=0,
+      and an aria-label describing its function. */
+  if (touchLeft)   { touchLeft.setAttribute("role", "button"); touchLeft.setAttribute("tabindex", "0"); touchLeft.setAttribute("aria-label", "Rotate left"); }
+  if (touchThrust) { touchThrust.setAttribute("role", "button"); touchThrust.setAttribute("tabindex", "0"); touchThrust.setAttribute("aria-label", "Thrust forward"); }
+  if (touchRight)  { touchRight.setAttribute("role", "button"); touchRight.setAttribute("tabindex", "0"); touchRight.setAttribute("aria-label", "Rotate right"); }
+  if (touchFire)   { touchFire.setAttribute("role", "button"); touchFire.setAttribute("tabindex", "0"); touchFire.setAttribute("aria-label", "Fire weapon"); }
+  if (muteBtn)     { muteBtn.setAttribute("role", "button"); muteBtn.setAttribute("tabindex", "0"); muteBtn.setAttribute("aria-label", "Toggle mute"); }
+
   let safeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 
   /* ── Audio (Web Audio API) ─────────────────────────── */
@@ -28,7 +37,9 @@
   let thrustTimer = 0;
 
   function initAudio() {
-    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(function(e) { console.warn("audioCtx resume failed:", e); muted = true; });
+    }
     if (audioCtx) return;
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     masterGain = audioCtx.createGain();
@@ -38,7 +49,7 @@
 
   function playTone(freq, dur, type, vol) {
     if (!audioCtx || muted) return;
-    if (audioCtx.state === 'suspended') { audioCtx.resume(); }
+    if (audioCtx.state === 'suspended') { audioCtx.resume().catch(function(e) { console.warn("audioCtx resume failed:", e); }); }
     const o = audioCtx.createOscillator();
     const g = audioCtx.createGain();
     o.type = type || "square";
@@ -80,6 +91,31 @@
 
   muteBtn.addEventListener("click", () => { toggleMute(); });
 
+  /* Mute button pressed state: visual feedback while held via pointer events.
+      Toggles a .pressed CSS class on the button element during hold, providing
+      tactile visual confirmation of the current mute mode. */
+  let muteBtnPressed = false;
+  if (muteBtn) {
+    muteBtn.addEventListener("pointerdown", e => {
+      if (!muteBtnPressed) {
+        muteBtnPressed = true;
+        muteBtn.classList.add("pressed");
+      }
+    });
+    muteBtn.addEventListener("pointerup", () => {
+      if (muteBtnPressed) {
+        muteBtnPressed = false;
+        muteBtn.classList.remove("pressed");
+      }
+    });
+    muteBtn.addEventListener("pointerleave", () => {
+      if (muteBtnPressed) {
+        muteBtnPressed = false;
+        muteBtn.classList.remove("pressed");
+      }
+    });
+  }
+
   /* ── Resize ─────────────────────────────────────────── */
   function updateSafeInsets() {
     const root = getComputedStyle(document.documentElement);
@@ -92,16 +128,30 @@
   }
 
   function regenerateStars() {
+    const rng = seededRandom(12345);
     stars = [];
     for (let i = 0; i < 120; i++) {
-      stars.push({ x: Math.random() * W, y: Math.random() * H, s: Math.random() * 1.5 + 0.3, b: Math.random() });
+      stars.push({ x: rng() * W, y: rng() * H, s: rng() * 1.5 + 0.3, b: rng() });
     }
   }
 
   function resize() {
-    W = canvas.width  = window.innerWidth;
-    H = canvas.height = window.innerHeight;
+    const oldW = W, oldH = H;
+    const pxRatio = window.devicePixelRatio || 1;
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.style.width  = W + "px";
+    canvas.style.height = H + "px";
+    canvas.width  = Math.floor(W * pxRatio);
+    canvas.height = Math.floor(H * pxRatio);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     updateSafeInsets();
+
+    /* Preserve player world position across resize (Item 15). */
+    if (oldW > 0 && oldH > 0) {
+      player.x = (player.x / oldW) * W;
+      player.y = (player.y / oldH) * H;
+    }
   }
 
   function onResize() {
@@ -118,31 +168,72 @@
   let canvasTapped = false;
 
   /* Primary-touch locking: each button remembers the touch identifier that
-     activated it. Only that specific touch can deactivate it. This prevents
-     a second finger from accidentally toggling a held button. */
+      activated it. Only that specific touch can deactivate it. This prevents
+      a second finger from accidentally toggling a held button. */
   let touchLeftId  = null, touchThrustId = null, touchRightId = null, touchFireId = null;
 
-  function setTouch(id, on, touchId) {
-    if (id === "left") {
-      if (on) { touchLeftOn = true; touchLeftId = touchId; }
-      else if (touchId === touchLeftId) { touchLeftOn = false; touchLeftId = null; }
-    }
-    if (id === "thrust") {
-      if (on) { touchThrustOn = true; touchThrustId = touchId; }
-      else if (touchId === touchThrustId) { touchThrustOn = false; touchThrustId = null; }
-    }
-    if (id === "right") {
-      if (on) { touchRightOn = true; touchRightId = touchId; }
-      else if (touchId === touchRightId) { touchRightOn = false; touchRightId = null; }
-    }
-    if (id === "fire") {
-      if (on) { touchFireOn = true; touchFireId = touchId; }
-      else if (touchId === touchFireId) { touchFireOn = false; touchFireId = null; }
+  /* Touch map: maps active touch identifiers to the button they control.
+      Used by getTouchId to resolve which button a changedTouches entry belongs to,
+      even when multiple touches end/cancel simultaneously. */
+  let activeTouchMap = {};
+
+  /* Diagnostic overlay log: captures input conflicts and resolutions for debugging.
+      Only rendered when diagnostic mode is enabled (window._diagnosticEnabled). */
+  let diagnosticLog = [];
+  const DIAGNOSTIC_MAX_ENTRIES = 50;
+
+  function diagnosticLogEntry(message) {
+    if (!window._diagnosticEnabled) return;
+    const timestamp = String(attractFrame || 0).padStart(6, "0");
+    diagnosticLog.push(`[${timestamp}] ${message}`);
+    if (diagnosticLog.length > DIAGNOSTIC_MAX_ENTRIES) {
+      diagnosticLog = diagnosticLog.slice(-DIAGNOSTIC_MAX_ENTRIES);
     }
   }
 
+  function clearDiagnosticLog() {
+    diagnosticLog.length = 0;
+  }
+
+  function setTouch(id, on, touchId) {
+    if (id === "left") {
+      if (on) { touchLeftOn = true; touchLeftId = touchId; activeTouchMap[touchId] = "left"; }
+      else if (touchId === touchLeftId) { touchLeftOn = false; touchLeftId = null; delete activeTouchMap[touchId]; }
+    }
+    if (id === "thrust") {
+      if (on) { touchThrustOn = true; touchThrustId = touchId; activeTouchMap[touchId] = "thrust"; }
+      else if (touchId === touchThrustId) { touchThrustOn = false; touchThrustId = null; delete activeTouchMap[touchId]; }
+    }
+    if (id === "right") {
+      if (on) { touchRightOn = true; touchRightId = touchId; activeTouchMap[touchId] = "right"; }
+      else if (touchId === touchRightId) { touchRightOn = false; touchRightId = null; delete activeTouchMap[touchId]; }
+    }
+    if (id === "fire") {
+      if (on) { touchFireOn = true; touchFireId = touchId; activeTouchMap[touchId] = "fire"; }
+      else if (touchId === touchFireId) { touchFireOn = false; touchFireId = null; delete activeTouchMap[touchId]; }
+    }
+  }
+
+  /* Resolve a touch event's changedTouches entries against the activeTouchMap.
+      Returns an array of { identifier, buttonId } pairs for all changed touches
+      that match currently-active touch map entries. This handles the case where
+      multiple fingers release/cancel simultaneously — each is resolved to its
+      correct button by matching identifier, not just taking changedTouches[0]. */
+  function resolveTouchIds(e) {
+    const results = [];
+    if (!e.changedTouches || e.changedTouches.length === 0) return results;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const tid = e.changedTouches[i].identifier;
+      if (activeTouchMap[tid] !== undefined) {
+        results.push({ identifier: tid, buttonId: activeTouchMap[tid] });
+      }
+    }
+    return results;
+  }
+
   function getTouchId(e) {
-    if (e.changedTouches && e.changedTouches.length > 0) return e.changedTouches[0].identifier;
+    const resolved = resolveTouchIds(e);
+    if (resolved.length > 0) return resolved[0].identifier;
     if (e.targetTouches && e.targetTouches.length > 0) return e.targetTouches[0].identifier;
     return null;
   }
@@ -157,13 +248,27 @@
     });
     el.addEventListener("touchend", e => {
       e.preventDefault();
-      const tid = getTouchId(e);
-      setTouch(id, false, tid);
+      const resolved = resolveTouchIds(e);
+      if (resolved.length > 0) {
+        for (const r of resolved) {
+          if (r.buttonId === id) setTouch(id, false, r.identifier);
+        }
+      } else {
+        const tid = getTouchId(e);
+        setTouch(id, false, tid);
+      }
     });
     el.addEventListener("touchcancel", e => {
       e.preventDefault();
-      const tid = getTouchId(e);
-      setTouch(id, false, tid);
+      const resolved = resolveTouchIds(e);
+      if (resolved.length > 0) {
+        for (const r of resolved) {
+          if (r.buttonId === id) setTouch(id, false, r.identifier);
+        }
+      } else {
+        const tid = getTouchId(e);
+        setTouch(id, false, tid);
+      }
     });
 
     /* Pointer Events fallback for non-touch pointers (mice, stylus on tablets in desktop mode). */
@@ -196,6 +301,17 @@
       initAudio();
       if (state === "playing") idleTimer = 0;
       if (e.code === 'KeyM') toggleMute();
+      /* High-score clear shortcut: Shift+H or Ctrl+H with confirmation.
+          Removes all stored scores from localStorage and resets the table to empty. */
+      if ((e.shiftKey || e.ctrlKey) && (e.code === 'KeyH')) {
+        e.preventDefault();
+        if (confirm("Clear all high scores? This cannot be undone.")) {
+          highScoreTable.length = 0;
+          saveHighScoreTable();
+          try { localStorage.removeItem("sc2_highscore"); } catch(e) {}
+          highScore = 0;
+        }
+      }
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyF', 'Enter'].includes(e.code)) {
         e.preventDefault();
       }
@@ -268,8 +384,37 @@
   window._touchFireId   = () => touchFireId;
   }
 
-  function rotDir() { return (keys.ArrowLeft || keys.KeyA || touchLeftOn)  ? -1 :
-                     (keys.ArrowRight|| keys.KeyD || touchRightOn) ?  1 : 0; }
+  function rotDir() {
+    const leftActive = keys.ArrowLeft || keys.KeyA || touchLeftOn;
+    const rightActive = keys.ArrowRight || keys.KeyD || touchRightOn;
+
+    /* Simultaneous left+right conflict: log and resolve deterministically.
+       Resolution rule: last-input-wins based on which direction was most recently activated.
+       When both are active, the direction whose key/touch was pressed last wins.
+       This is determined by checking which touch lock is most recently set, or falling back to left priority. */
+    if (leftActive && rightActive) {
+      diagnosticLogEntry(`CONFLICT: left+right active — resolving (left=${!!(keys.ArrowLeft || keys.KeyA)}, right=${!!(keys.ArrowRight || keys.KeyD)}, touchL=${touchLeftOn}, touchR=${touchRightOn})`);
+
+      /* Determine last-input-wins: check which direction has the most recent touch activation.
+         If neither has an active touch, prefer left (deterministic fallback). */
+      const lastLeftTouch = touchLeftId !== null;
+      const lastRightTouch = touchRightId !== null;
+
+      if (lastLeftTouch && !lastRightTouch) return -1;
+      if (lastRightTouch && !lastLeftTouch) return 1;
+
+      /* Both have active touches or neither does: prefer the one with a key press.
+         If both have keys, prefer left as deterministic default. */
+      if ((keys.ArrowLeft || keys.KeyA) && !(keys.ArrowRight || keys.KeyD)) return -1;
+      if (!(keys.ArrowLeft || keys.KeyA) && (keys.ArrowRight || keys.KeyD)) return 1;
+
+      /* Both keys and both touches active: deterministic fallback to left. */
+      return -1;
+    }
+
+    return (keys.ArrowLeft || keys.KeyA || touchLeftOn)  ? -1 :
+           (keys.ArrowRight|| keys.KeyD || touchRightOn) ?  1 : 0;
+  }
   function thrustDir() { return (keys.ArrowUp || keys.KeyW || touchThrustOn) ? 1 : 0; }
   function fireDir()   { return keys.Space || keys.KeyF || touchFireOn; }
 
@@ -316,6 +461,10 @@ function coreMineInterval(level) {
   /* ── Game state ─────────────────────────────────────── */
 let state = "attract"; // attract | playing | coreDestruction | dead | levelTransition | dying
 
+/* Game mode: "fidelity" matches original three mine-threat design;
+   "arcade" enables additional enemy types and continuous extra spawns. */
+let gameMode = "fidelity"; // fidelity | arcade
+
 /* Idle timeout: after IDLE_TIMEOUT frames of no input during gameplay,
    return to attract mode (cabinet coin-drop behavior). */
 const IDLE_TIMEOUT = 1800; // 30s at 60fps
@@ -329,6 +478,7 @@ let deathTimer = 0;
 let deadPauseTimer = 0; // deterministic freeze before input accepted on dead state
 let deathExplosionX = 0, deathExplosionY = 0;
 let spawnTimer = 0;
+let continuousSpawnIndex = 0;
 let coreMineTimer = 0;
 let shieldAngle = 0; /* frame-accumulated shield rotation state (deterministic, frame-rate independent) */
 
@@ -352,7 +502,18 @@ let attractFrame      = 0;
   let highScoreTable = [];
   try {
     const saved = JSON.parse(localStorage.getItem("sc2_hst") || "[]");
-    if (Array.isArray(saved)) highScoreTable = saved.slice(0, HIGH_SCORE_SLOTS);
+    if (Array.isArray(saved)) {
+      highScoreTable = saved.filter(function(entry) {
+        if (typeof entry === "number") return entry >= 0;
+        if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+          var s = entry.score, n = entry.name;
+          if (typeof s === "number" && s >= 0) {
+            return typeof n !== "string" || n.length === 0 ? true : (typeof n === "string");
+          }
+        }
+        return false;
+      }).slice(0, HIGH_SCORE_SLOTS);
+    }
   } catch(e) {}
 
   function saveHighScoreTable() {
@@ -616,9 +777,14 @@ function advanceAttractCard() {
     } else if (type === "fast") {
       speed = baseSpeed * 1.6;
       hp = 1; size = 10; color = "#ffcc00";
-    } else {
+    } else if (gameMode === "arcade") {
+      /* Arcade mode only: heavy enemy beyond original three-mine-threat */
       speed = baseSpeed * 1.2;
       hp = 3; size = 16; color = "#ff0088";
+    } else {
+      /* Fallback in fidelity mode: treat as fast */
+      speed = baseSpeed * 1.6;
+      hp = 1; size = 10; color = "#ffcc00";
     }
 
     const angleToPlayer = Math.atan2(player.y - y, player.x - x);
@@ -1149,11 +1315,13 @@ function advanceAttractCard() {
       /* Enemy vs bullets (already handled above) */
     }
 
-    /* Continuous enemy spawning */
+    /* Continuous enemy spawning — fidelity mode rotates through all 3 original types */
     spawnTimer--;
     if (spawnTimer <= 0) {
       spawnTimer = spawnInterval(level);
-      spawnEnemy("chaser");
+      const cycle = ["mine", "chaser", "fast"];
+      spawnEnemy(cycle[continuousSpawnIndex % 3]);
+      continuousSpawnIndex++;
     }
 
     updateParticles();
