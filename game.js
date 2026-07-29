@@ -140,6 +140,16 @@
     const pxRatio = window.devicePixelRatio || 1;
     W = window.innerWidth;
     H = window.innerHeight;
+
+    /* Fix 12: Mobile viewport scaling — scale game world to fill viewport */
+    const minDim = Math.min(W, H);
+    const scale = minDim < 600 ? (minDim / 800) : 1;
+    if (scale < 1) {
+      canvas.style.transform = `scale(${scale})`;
+      canvas.style.transformOrigin = 'center center';
+    } else {
+      canvas.style.transform = '';
+    }
     canvas.style.width  = W + "px";
     canvas.style.height = H + "px";
     canvas.width  = Math.floor(W * pxRatio);
@@ -585,7 +595,7 @@ function advanceAttractCard() {
       player.rings[i].destroyed = false;
       player.rings[i].breachFlash = 0;
     }
-    player.invincible = 120; // frames
+    player.invincible = 30; // frames (~0.5s at 60fps)
     player.alive = true;
     player.fireCooldown = 0;
     player.regenAnimFrames = 0;
@@ -606,8 +616,8 @@ function advanceAttractCard() {
     const tipY = player.y + Math.sin(player.angle) * 16;
     bullets.push({
       x: tipX, y: tipY,
-      vx: Math.cos(player.angle) * 10 + player.vx * 0.2,
-      vy: Math.sin(player.angle) * 10 + player.vy * 0.2,
+      vx: Math.cos(player.angle) * 14 + player.vx * 0.2,
+      vy: Math.sin(player.angle) * 14 + player.vy * 0.2,
       life: 90,
     });
     sfxShoot();
@@ -620,7 +630,6 @@ function advanceAttractCard() {
     fireCooldown: 0,
     muzzleFlash: 0,
     locked: false,
-    hp: 5, maxHp: 5,
     alive: true,
   };
   let cannonShots = [];
@@ -632,8 +641,6 @@ function advanceAttractCard() {
     core.fireCooldown = 0;
     core.muzzleFlash = 0;
     core.locked = false;
-    core.hp = 3 + level * 2;
-    core.maxHp = core.hp;
     core.alive = true;
     cannonShots.length = 0;
     coreMineTimer = coreMineInterval(level);
@@ -714,6 +721,7 @@ function advanceAttractCard() {
       vx: Math.cos(targetAngle) * speed,
       vy: Math.sin(targetAngle) * speed,
       life: 300,
+      size: 8, // Larger cannon shot (original: distinctive large fireball)
     });
     sfxMine();
   }
@@ -812,7 +820,7 @@ function advanceAttractCard() {
      to create circular orbit. Homing behavior still applies toward player. */
   function spawnCoreMine() {
     if (!core.alive) return;
-    const MAX_CORE_MINES = 8;
+    const MAX_CORE_MINES = 3;
     const activeCoreMines = enemies.filter(e => e.coreSpawned).length;
     if (activeCoreMines >= MAX_CORE_MINES) return;
     const orbitRadius = 100;
@@ -874,9 +882,9 @@ function advanceAttractCard() {
      glow is the shadow blur radius for that ring's ghost pass. Outer rings are
      brighter/larger so the player reads "outer = primary defense" instantly. */
   const SHIELD_RINGS = [
-    { radius: 38, segments: 8, speed: 0.04, color: "#55ff55", intensity: 0.30, glow: 6 },
-    { radius: 52, segments: 8, speed: -0.03, color: "#33dd33", intensity: 0.65, glow: 10 },
-    { radius: 68, segments: 8, speed: 0.025, color: "#11bb11", intensity: 0.95, glow: 14 },
+    { radius: 38, segments: 12, speed: 0.04, color: "#55ff55", intensity: 0.30, glow: 6 },
+    { radius: 52, segments: 12, speed: -0.03, color: "#33dd33", intensity: 0.65, glow: 10 },
+    { radius: 68, segments: 12, speed: 0.025, color: "#11bb11", intensity: 0.95, glow: 14 },
   ];
 
   /* Gap tick: short perpendicular line drawn at each arc endpoint. Mirrors the
@@ -958,11 +966,11 @@ function advanceAttractCard() {
   }
 
   /* Ring regeneration: when the outermost active ring is destroyed,
-      shift remaining inner rings outward and spawn a fresh ring at the core.
-      Only fires when there is at least one surviving ring to shift.
-      Visual feedback: a deterministic REGEN_ANIM_FRAMES animation shows
-      existing rings moving outward while a new inner ring expands into place.
-      During animation, collision uses pre-shift radii to prevent gaps. */
+    shift remaining inner rings outward and spawn a fresh ring at the core.
+    Only fires when there is at least one surviving ring to shift.
+    Visual feedback: dramatic REGEN_ANIM_FRAMES animation shows
+    existing rings expanding outward with glow burst while a new inner ring
+    blooms from the core center (original Star Castle cabinet cascade). */
   function tryRegenRings(destroyedIndex) {
     let isOutermostActive = true;
     for (let i = destroyedIndex + 1; i < SHIELD_RINGS.length; i++) {
@@ -992,6 +1000,13 @@ function advanceAttractCard() {
 
     sfxShieldRegen();
     spawnParticles(player.x, player.y, "#33ff33", 24);
+
+    /* Dramatic cascade: spawn extra glow particles at each ring's position */
+    for (let ri = 0; ri < SHIELD_RINGS.length; ri++) {
+      if (!player.rings[ri].destroyed) {
+        spawnParticles(player.x, player.y, SHIELD_RINGS[ri].color, 12);
+      }
+    }
   }
 
   /* ── Update ─────────────────────────────────────────── */
@@ -1057,6 +1072,9 @@ function advanceAttractCard() {
     }
 
     if (state !== "playing") return;
+
+    /* Paused: freeze all updates, skip frame processing */
+    if (state === "paused") return;
 
     /* Advance shield rotation state per frame — deterministic, frame-rate independent.
         Original Star Castle cabinet used fixed per-frame angular step for shield rings;
@@ -1135,6 +1153,23 @@ function advanceAttractCard() {
     if (player.fireCooldown > 0) player.fireCooldown--;
     if (fireDir()) fireBullet();
 
+    /* Max 4 simultaneous bullets (player + cannon combined) — original cabinet limit */
+    const totalProjectiles = bullets.length + cannonShots.length;
+    while (totalProjectiles > 4 && bullets.length > 0) {
+      bullets.shift();
+    }
+
+    /* Pause: 'P' or Escape freezes all updates */
+    if (keys.KeyP || keys.Escape) {
+      if (!window._paused) {
+        window._paused = true;
+        state = "paused";
+      } else if (state === "paused") {
+        window._paused = false;
+        state = "playing";
+      }
+    }
+
     /* Shield regen */
     player.shieldRegenTimer++;
     if (player.shieldRegenTimer >= 60) {
@@ -1186,29 +1221,26 @@ function advanceAttractCard() {
       }
       if (bulletConsumed) continue;
 
-      /* Bullet vs core */
+      /* Bullet vs core — one-shot kill (original: single bullet through gap destroys cannon) */
       if (core.alive && dist(b, core) < 20) {
-        core.hp--;
         bullets.splice(i, 1);
         bulletConsumed = true;
         spawnParticles(core.x, core.y, "#ff4444", 8);
-        sfxHit();
-        if (core.hp <= 0) {
-          core.alive = false;
-          score += 200;
-          sfxExplosion();
-          /* Purge core-spawned mines on core death to prevent leak */
-          for (let k = enemies.length - 1; k >= 0; k--) {
-            if (enemies[k].coreSpawned) {
-              spawnParticles(enemies[k].x, enemies[k].y, "#ffff00", 4);
-              enemies.splice(k, 1);
-            }
+        sfxExplosion();
+        core.alive = false;
+        score += 5000;
+        lives = Math.min(9, lives + 1); // Extra ship for cannon destruction (original)
+        /* Purge core-spawned mines on core death to prevent leak */
+        for (let k = enemies.length - 1; k >= 0; k--) {
+          if (enemies[k].coreSpawned) {
+            spawnParticles(enemies[k].x, enemies[k].y, "#ffff00", 4);
+            enemies.splice(k, 1);
           }
-          state = "coreDestruction";
-          coreDestructionTimer = 90;
-          debrisSpawned = false;
-          cannonShots.length = 0;
         }
+        state = "coreDestruction";
+        coreDestructionTimer = 90;
+        debrisSpawned = false;
+        cannonShots.length = 0;
         break;
       }
       if (bulletConsumed) continue;
@@ -1218,7 +1250,9 @@ function advanceAttractCard() {
         const hitRing = checkShieldCollision(b);
         if (hitRing >= 0) {
           const rs = player.rings[hitRing];
-          rs.health = Math.max(0, rs.health - 25);
+          const segsBefore = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
+          rs.health = Math.max(0, rs.health - 4.17);
+          const segsAfter = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
           const justDestroyed = rs.health <= 0 && !rs.destroyed;
           if (rs.health <= 0) rs.destroyed = true;
           rs.breachFlash = 30;
@@ -1227,6 +1261,9 @@ function advanceAttractCard() {
           if (justDestroyed) sfxBreach();
           spawnParticles(player.x, player.y, "#33ff33", 12);
           if (justDestroyed) tryRegenRings(hitRing);
+          /* Award 100 points per destroyed segment (Fix 8) */
+          const segsLost = segsBefore - segsAfter;
+          if (segsLost > 0) score += segsLost * 100;
         } else if (dist(b, player) < 18) {
           bullets.splice(i, 1);
           hitPlayer();
@@ -1242,12 +1279,14 @@ function advanceAttractCard() {
       c.life--;
       if (c.life <= 0) { cannonShots.splice(i, 1); continue; }
 
-      /* Cannon shot vs player shields (fromOutside: pass through gaps to inner rings) */
+      /* Cannon shot vs player shields — blocked by own rings (original: can shoot yourself) */
       if (dist(c, player) < 100) {
-        const hitRing = checkShieldCollision(c, true);
+        const hitRing = checkShieldCollision(c, false); // false = blocked by own rings
         if (hitRing >= 0) {
           const rs = player.rings[hitRing];
-          rs.health = Math.max(0, rs.health - 20);
+          const segsBefore = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
+          rs.health = Math.max(0, rs.health - 4.17);
+          const segsAfter = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
           const justDestroyed = rs.health <= 0 && !rs.destroyed;
           if (rs.health <= 0) rs.destroyed = true;
           rs.breachFlash = 30;
@@ -1293,7 +1332,9 @@ function advanceAttractCard() {
         const hitRing = checkShieldCollision(e);
         if (hitRing >= 0) {
           const rs = player.rings[hitRing];
-          rs.health = Math.max(0, rs.health - 25);
+          const segsBefore = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
+          rs.health = Math.max(0, rs.health - 4.17);
+          const segsAfter = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
           const justDestroyed = rs.health <= 0 && !rs.destroyed;
           if (rs.health <= 0) rs.destroyed = true;
           rs.breachFlash = 30;
@@ -1315,14 +1356,16 @@ function advanceAttractCard() {
       /* Enemy vs bullets (already handled above) */
     }
 
-    /* Continuous enemy spawning — fidelity mode rotates through all 3 original types */
+    /* Continuous enemy spawning — fidelity mode: only core mines (original Star Castle had no edge-spawning enemies) */
     spawnTimer--;
-    if (spawnTimer <= 0) {
+    if (spawnTimer <= 0 && gameMode === "arcade") {
       spawnTimer = spawnInterval(level);
       const cycle = ["mine", "chaser", "fast"];
       spawnEnemy(cycle[continuousSpawnIndex % 3]);
       continuousSpawnIndex++;
     }
+
+    /* No level cap — original Star Castle is endless (Fix 16) */
 
     updateParticles();
   }
@@ -2051,7 +2094,7 @@ function advanceAttractCard() {
       }
     }
 
-    /* Background — true black for faithful vector cabinet feel */
+    /* Background — true black for faithful vector cabinet feel (Fix 14) */
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, W, H);
 
@@ -2161,6 +2204,27 @@ function advanceAttractCard() {
 
     if (state === "dying") {
       drawDying();
+      return;
+    }
+
+    if (state === "paused") {
+      /* Draw game frozen, overlay PAUSED text */
+      drawHUD();
+      ctx.textAlign = "center";
+      const pauseSize = Math.floor(W * 0.12);
+      ctx.font = `bold ${pauseSize}px "Courier New", monospace`;
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 4;
+      ctx.shadowColor = "#ffcc00";
+      ctx.shadowBlur = 18;
+      ctx.globalAlpha = 0.15;
+      ctx.strokeText("PAUSED", W / 2, H / 2);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#ffffff";
+      glow("#ffaa00", 20);
+      ctx.fillText("PAUSED", W / 2, H / 2);
+      noGlow();
+      ctx.textAlign = "left";
       return;
     }
 
@@ -2336,6 +2400,20 @@ function advanceAttractCard() {
         ctx.lineTo(bx, -16);
         ctx.lineTo(bx + battW, -16);
         ctx.lineTo(bx + battW, -12);
+        ctx.stroke();
+      }
+
+      /* Lock-on visual feedback (Fix 19): barrel pulses when locked on target */
+      if (core.locked && core.muzzleFlash === 0) {
+        const lockPulse = Math.sin(Date.now() * 0.01) * 0.3 + 0.7;
+        ctx.strokeStyle = `rgba(255, ${Math.floor(100 * lockPulse)}, 0, ${lockPulse})`;
+        ctx.lineWidth = 2;
+        ctx.shadowColor = "#ff6600";
+        ctx.shadowBlur = 12;
+        const barrelLen = 30 + lockPulse * 5;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(core.angle) * barrelLen, Math.sin(core.angle) * barrelLen);
         ctx.stroke();
       }
 
