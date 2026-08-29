@@ -1,3046 +1,1367 @@
 (function() {
   "use strict";
 
-  /* ── Canvas & DOM refs ─────────────────────────────── */
+  /* ═══════════════════════════════════════════════════════════════════
+     STAR CASTLE 2 — faithful recreation of the 1980 Cinematronics
+     vector arcade game (design: Tim Skelly, code: Scott Boden).
+
+     FIDELITY MODEL (original arcade rules):
+       • The central CASTLE (turret) sits dead center, defended by 3
+         concentric rotating shield rings of 12 independent sections each.
+         Every section takes TWO hits to destroy.
+       • Rings rotate in OPPOSITE directions to each other.
+       • The player's ship attacks from OUTSIDE, shooting through the
+         rotating gaps. A ship touching a live shield section dies.
+       • Exactly 3 MINES are launched by the castle. They orbit the
+         castle, then break loose and home in on the player. They pass
+         through the shields. No points for destroying them. Mines are
+         restored whenever the shield rings regenerate.
+       • The cannon tracks the player at all times and fires a large
+         white-noise FUZZBALL whenever it has a clear line of fire
+         (aligned gaps — and always, once the inner ring is down).
+       • When the OUTERMOST ring is fully destroyed the shields
+         regenerate: middle expands out, inner becomes middle, a brand
+         new ring blooms at the core, and mines are restored.
+       • Destroying the castle = 1,440 points + an EXTRA SHIP, and the
+         remaining rings collapse inward in a slow crumbling animation.
+       • Difficulty increases per level AND continuously within a level.
+       • Color overlay palette: outer ring YELLOW, middle ORANGE, inner
+         RED; castle / ship / mines / text BLUE-WHITE vector beams.
+       • The playfield WRAPS on all four edges.
+       • Cabinet controls: TURN LEFT, TURN RIGHT, THRUST, FIRE.
+
+     Scoring note: the castle value (1,440 + extra ship) and the
+     "no points for mines" rule are straight from the original
+     operation manual. Per-section ring values (outer 30 / middle 40 /
+     inner 50 per section destroyed) follow widely cited convention and
+     are a documented design choice of this recreation.
+     ═══════════════════════════════════════════════════════════════════ */
+
+  /* ── Canvas & DOM refs ─────────────────────────────────────────────── */
   const canvas = document.getElementById("gameCanvas");
   const ctx    = canvas.getContext("2d", { alpha: false });
-  let W, H;
+  let W = 0, H = 0, S = 0; /* S = min(W,H): the scaling unit */
 
   const attractScreen = document.getElementById("attractScreen");
-  const attractPrompt = document.getElementById("attractPrompt");
-
-  const deadOverlay = document.getElementById("deadOverlay");
-  const deadContent = document.getElementById("deadContent");
-
-  const hud       = document.getElementById("hud");
-  const muteBtn   = document.getElementById("muteBtn");
+  const deadOverlay   = document.getElementById("deadOverlay");
+  const deadContent   = document.getElementById("deadContent");
+  const hud     = document.getElementById("hud");
+  const muteBtn = document.getElementById("muteBtn");
 
   const touchControls = document.getElementById("touchControls");
-  const touchLeft     = document.getElementById("touchLeft");
-  const touchThrust   = document.getElementById("touchThrust");
-  const touchRight    = document.getElementById("touchRight");
-  const touchFire     = document.getElementById("touchFire");
+  const touchLeft   = document.getElementById("touchLeft");
+  const touchThrust = document.getElementById("touchThrust");
+  const touchRight  = document.getElementById("touchRight");
+  const touchFire   = document.getElementById("touchFire");
 
-  /* Accessibility: make touch controls and mute button discoverable to
-      screen readers and keyboard navigation. Each gets role=button, tabindex=0,
-      and an aria-label describing its function. */
-  if (touchLeft)   { touchLeft.setAttribute("role", "button"); touchLeft.setAttribute("tabindex", "0"); touchLeft.setAttribute("aria-label", "Rotate left"); }
-  if (touchThrust) { touchThrust.setAttribute("role", "button"); touchThrust.setAttribute("tabindex", "0"); touchThrust.setAttribute("aria-label", "Thrust forward"); }
-  if (touchRight)  { touchRight.setAttribute("role", "button"); touchRight.setAttribute("tabindex", "0"); touchRight.setAttribute("aria-label", "Rotate right"); }
-  if (touchFire)   { touchFire.setAttribute("role", "button"); touchFire.setAttribute("tabindex", "0"); touchFire.setAttribute("aria-label", "Fire weapon"); }
-  if (muteBtn)     { muteBtn.setAttribute("role", "button"); muteBtn.setAttribute("tabindex", "0"); muteBtn.setAttribute("aria-label", "Toggle mute"); }
+  /* Accessibility attributes on touch/mute controls */
+  [[touchLeft, "Rotate left"], [touchThrust, "Thrust forward"],
+   [touchRight, "Rotate right"], [touchFire, "Fire weapon"],
+   [muteBtn, "Toggle mute"]].forEach(function(pair) {
+    const el = pair[0];
+    if (!el) return;
+    el.setAttribute("role", "button");
+    el.setAttribute("tabindex", "0");
+    el.setAttribute("aria-label", pair[1]);
+  });
 
   let safeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 
-  /* ── Audio (Web Audio API) ─────────────────────────── */
+  /* ── Audio (Web Audio API) ─────────────────────────────────────────── */
   let audioCtx = null, masterGain = null, muted = false;
   let thrustTimer = 0;
 
   function initAudio() {
-    if (audioCtx && audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(function(e) { console.warn("audioCtx resume failed:", e); muted = true; });
-    }
-    if (audioCtx) return;
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    masterGain = audioCtx.createGain();
-    masterGain.gain.value = 0.35;
-    masterGain.connect(audioCtx.destination);
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext || null;
+      if (!AC) return;
+      if (!audioCtx) {
+        audioCtx = new AC();
+        masterGain = audioCtx.createGain();
+        masterGain.gain.value = 0.9;
+        masterGain.connect(audioCtx.destination);
+      } else if (audioCtx.state === "suspended") {
+        audioCtx.resume();
+      }
+    } catch (e) { audioCtx = null; }
   }
 
-  function playTone(freq, dur, type, vol) {
+  function playTone(freq, dur, type, vol, freqEnd) {
     if (!audioCtx || muted) return;
-    if (audioCtx.state === 'suspended') { audioCtx.resume().catch(function(e) { console.warn("audioCtx resume failed:", e); }); }
-    const o = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    o.type = type || "square";
-    o.frequency.value = freq;
-    g.gain.setValueAtTime(vol || 0.12, audioCtx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
-    o.connect(g).connect(masterGain);
-    o.start();
-    o.stop(audioCtx.currentTime + dur);
+    try {
+      const t = audioCtx.currentTime;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, t);
+      if (freqEnd) o.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      o.connect(g); g.connect(masterGain);
+      o.start(t); o.stop(t + dur);
+    } catch (e) {}
   }
 
-  /* Cabinet-fidelity audio palette: short, distinct, procedural vector-arcade cues.
-     Waveforms chosen per their 1980s vector arcade character:
-     - triangle: soft rumble (thrust)
-     - square: bright ping (shoot, shield)
-     - sawtooth: aggressive bite (hit, breach, cannon, explosion, death)
-     - sine: melodic arc (victory/level-up, shield regen)
-     iPhone-safe: initAudio resumes suspended context; playTone guards against suspend. */
-
-  function sfxThrust() { thrustTimer++; if (thrustTimer > 1 && thrustTimer % 8 !== 0) return; playTone(80, 0.04, "triangle", 0.04); }
-
-  function sfxShoot() { playTone(660, 0.06, "square", 0.08); if (audioCtx && !muted) { var t = audioCtx.currentTime, o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain(); o2.type = "square"; o2.frequency.setValueAtTime(1200, t); o2.frequency.exponentialRampToValueAtTime(480, t + 0.035); g2.gain.setValueAtTime(0.04, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.06); o2.connect(g2).connect(masterGain); o2.start(t); o2.stop(t + 0.06); } }
-
-  function sfxExplosion() { playTone(80, 0.15, "sawtooth", 0.15); playTone(45, 0.25, "square", 0.10); }
-
-  function sfxHit() { playTone(300, 0.04, "square", 0.12); if (audioCtx && !muted) { var t = audioCtx.currentTime, o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain(); o2.type = "square"; o2.frequency.value = 900; g2.gain.setValueAtTime(0.06, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.025); o2.connect(g2).connect(masterGain); o2.start(t); o2.stop(t + 0.025); } }
-
-  function sfxShield() { playTone(1500, 0.04, "square", 0.06); }
-
-  function sfxBreach() { playTone(150, 0.08, "sawtooth", 0.12); playTone(800, 0.03, "square", 0.08); if (audioCtx && !muted) { var t = audioCtx.currentTime, o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain(); o2.type = "sawtooth"; o2.frequency.setValueAtTime(2400, t); o2.frequency.exponentialRampToValueAtTime(400, t + 0.035); g2.gain.setValueAtTime(0.06, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.04); o2.connect(g2).connect(masterGain); o2.start(t); o2.stop(t + 0.04); } }
-
-  function sfxLevelUp() { [523,659,784,1047,1319].forEach((f,i) => setTimeout(() => playTone(f, 0.20, "sine", 0.10), i*70)); }
-
-  function sfxDeath() { [300,220,150,80].forEach((f,i) => setTimeout(() => playTone(f, 0.30, "sawtooth", 0.15), i*100)); }
-
-  function sfxMine() { playTone(100, 0.08, "sawtooth", 0.12); playTone(55, 0.05, "square", 0.06); }
-
-  function sfxShieldRegen() { [440,554,659,880,1100].forEach((f,i) => setTimeout(() => playTone(f, 0.15, "sine", 0.10), i*50)); }
-
-  muteBtn.addEventListener("click", () => { toggleMute(); });
-
-  /* Mute button pressed state: visual feedback while held via pointer events.
-      Toggles a .pressed CSS class on the button element during hold, providing
-      tactile visual confirmation of the current mute mode. */
-  let muteBtnPressed = false;
-  if (muteBtn) {
-    muteBtn.addEventListener("pointerdown", e => {
-      if (!muteBtnPressed) {
-        muteBtnPressed = true;
-        muteBtn.classList.add("pressed");
-      }
-    });
-    muteBtn.addEventListener("pointerup", () => {
-      if (muteBtnPressed) {
-        muteBtnPressed = false;
-        muteBtn.classList.remove("pressed");
-      }
-    });
-    muteBtn.addEventListener("pointerleave", () => {
-      if (muteBtnPressed) {
-        muteBtnPressed = false;
-        muteBtn.classList.remove("pressed");
-      }
-    });
+  /* White-noise burst — the original cannon "fuzzball" hisses */
+  function playNoise(dur, vol, freqStart, freqEnd) {
+    if (!audioCtx || muted) return;
+    try {
+      const t = audioCtx.currentTime;
+      const len = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+      const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      const f = audioCtx.createBiquadFilter();
+      f.type = "bandpass";
+      f.frequency.setValueAtTime(freqStart, t);
+      f.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+      f.Q.value = 1.2;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      src.connect(f); f.connect(g); g.connect(masterGain);
+      src.start(t); src.stop(t + dur);
+    } catch (e) {}
   }
 
-  /* ── Resize ─────────────────────────────────────────── */
+  function sfxShoot()    { playTone(980, 0.05, "square", 0.07, 420); }
+  function sfxThrust()   { thrustTimer++; if (thrustTimer % 7 !== 0) return; playTone(85, 0.05, "triangle", 0.05, 60); }
+  function sfxRingHit()  { playTone(1600, 0.05, "square", 0.09, 1100); }
+  function sfxRingBreak(){ playTone(700, 0.12, "sawtooth", 0.11, 180); }
+  function sfxFuzzball() { playNoise(0.5, 0.16, 3400, 500); playTone(140, 0.25, "sawtooth", 0.08, 90); }
+  function sfxMineLaunch(){ playTone(300, 0.12, "square", 0.07, 900); }
+  function sfxMineDie()  { playTone(1200, 0.04, "triangle", 0.05, 300); }
+  function sfxCastleBoom(){ playNoise(0.9, 0.22, 900, 60); playTone(120, 0.7, "sawtooth", 0.16, 30); playTone(60, 0.9, "square", 0.12, 20); }
+  function sfxExtraShip(){ [523, 659, 784, 1047].forEach(function(f, i) { setTimeout(function() { playTone(f, 0.14, "sine", 0.09); }, i * 80); }); }
+  function sfxDeath()    { playNoise(0.6, 0.18, 1800, 120); [320, 240, 160, 90].forEach(function(f, i) { setTimeout(function() { playTone(f, 0.28, "sawtooth", 0.14); }, i * 90); }); }
+  function sfxRegen()    { [440, 554, 659, 880].forEach(function(f, i) { setTimeout(function() { playTone(f, 0.14, "sine", 0.09); }, i * 60); }); }
+  function sfxLevelIntro(){ playTone(660, 0.12, "square", 0.07); setTimeout(function() { playTone(880, 0.18, "square", 0.07); }, 140); }
+
+  /* ── Layout / resize / stars ───────────────────────────────────────── */
   function updateSafeInsets() {
-    const root = getComputedStyle(document.documentElement);
-    safeInsets = {
-      top: parseInt(root.getPropertyValue('--safe-top')) || 0,
-      right: parseInt(root.getPropertyValue('--safe-right')) || 0,
-      bottom: parseInt(root.getPropertyValue('--safe-bottom')) || 0,
-      left: parseInt(root.getPropertyValue('--safe-left')) || 0,
-    };
+    try {
+      const probe = document.createElement("div");
+      probe.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px);";
+      document.body.appendChild(probe);
+      const cs = getComputedStyle(probe);
+      safeInsets = {
+        top: parseInt(cs.paddingTop, 10) || 0,
+        bottom: parseInt(cs.paddingBottom, 10) || 0,
+        left: parseInt(cs.paddingLeft, 10) || 0,
+        right: parseInt(cs.paddingRight, 10) || 0
+      };
+      document.body.removeChild(probe);
+    } catch (e) {}
   }
 
+  let stars = [];
   function regenerateStars() {
-    const rng = seededRandom(12345);
     stars = [];
-    for (let i = 0; i < 120; i++) {
-      stars.push({ x: rng() * W, y: rng() * H, s: rng() * 1.5 + 0.3, b: rng() });
+    const count = Math.floor((W * H) / 9000);
+    for (let i = 0; i < count; i++) {
+      stars.push({ x: Math.random() * W, y: Math.random() * H, b: 0.25 + Math.random() * 0.6, tw: Math.random() * Math.PI * 2 });
     }
   }
 
   function resize() {
-    const oldW = W, oldH = H;
-    const pxRatio = window.devicePixelRatio || 1;
-    W = window.innerWidth;
-    H = window.innerHeight;
-
-    /* Fix 12: Mobile viewport scaling — scale game world to fill viewport */
-    const minDim = Math.min(W, H);
-    const scale = minDim < 600 ? (minDim / 800) : 1;
-    if (scale < 1) {
-      canvas.style.transform = `scale(${scale})`;
-      canvas.style.transformOrigin = 'center center';
-    } else {
-      canvas.style.transform = '';
-    }
-    canvas.style.width  = W + "px";
-    canvas.style.height = H + "px";
-    canvas.width  = Math.floor(W * pxRatio);
-    canvas.height = Math.floor(H * pxRatio);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const oldW = W || window.innerWidth, oldH = H || window.innerHeight;
     updateSafeInsets();
-
-    /* Preserve player world position across resize (Item 15). */
-    if (oldW > 0 && oldH > 0) {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    S = Math.min(W, H);
+    if (player && oldW > 0) {
       player.x = (player.x / oldW) * W;
       player.y = (player.y / oldH) * H;
     }
-  }
-
-  function onResize() {
-    resize();
     regenerateStars();
   }
 
-  window.addEventListener("resize", onResize);
-  resize();
+  let resizeTimer = null;
+  function onResize() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(resize, 120);
+  }
 
-  /* ── Input ─────────────────────────────────────────── */
+  /* ── Input ─────────────────────────────────────────────────────────── */
   const keys = {};
-  let touchLeftOn  = false, touchThrustOn = false, touchRightOn = false, touchFireOn = false;
-  let canvasTapped = false;
+  let touchLeftOn = false, touchThrustOn = false, touchRightOn = false, touchFireOn = false;
 
-  /* Primary-touch locking: each button remembers the touch identifier that
-      activated it. Only that specific touch can deactivate it. This prevents
-      a second finger from accidentally toggling a held button. */
-  let touchLeftId  = null, touchThrustId = null, touchRightId = null, touchFireId = null;
-
-  /* Touch map: maps active touch identifiers to the button they control.
-      Used by getTouchId to resolve which button a changedTouches entry belongs to,
-      even when multiple touches end/cancel simultaneously. */
-  let activeTouchMap = {};
-
-  /* Diagnostic overlay log: captures input conflicts and resolutions for debugging.
-      Only rendered when diagnostic mode is enabled (window._diagnosticEnabled). */
-  let diagnosticLog = [];
-  const DIAGNOSTIC_MAX_ENTRIES = 50;
-
-  function diagnosticLogEntry(message) {
-    if (!window._diagnosticEnabled) return;
-    const timestamp = String(attractFrame || 0).padStart(6, "0");
-    diagnosticLog.push(`[${timestamp}] ${message}`);
-    if (diagnosticLog.length > DIAGNOSTIC_MAX_ENTRIES) {
-      diagnosticLog = diagnosticLog.slice(-DIAGNOSTIC_MAX_ENTRIES);
-    }
+  function setTouch(which, on) {
+    if (which === "left")   touchLeftOn = on;
+    if (which === "thrust") touchThrustOn = on;
+    if (which === "right")  touchRightOn = on;
+    if (which === "fire")   touchFireOn = on;
   }
 
-  function clearDiagnosticLog() {
-    diagnosticLog.length = 0;
+  function bindTouch(el, which) {
+    if (!el) return;
+    const down = function(ev) { ev.preventDefault(); initAudio(); if (state === "attract") { startGame(); return; } if (state === "dead" && deadPauseTimer <= 0) { toAttract(); return; } setTouch(which, true); };
+    const up = function(ev) { ev.preventDefault(); setTouch(which, false); };
+    el.addEventListener("pointerdown", down);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+    el.addEventListener("pointerleave", up);
   }
 
-  function setTouch(id, on, touchId) {
-    if (id === "left") {
-      if (on) { touchLeftOn = true; touchLeftId = touchId; activeTouchMap[touchId] = "left"; }
-      else if (touchId === touchLeftId) { touchLeftOn = false; touchLeftId = null; delete activeTouchMap[touchId]; }
-    }
-    if (id === "thrust") {
-      if (on) { touchThrustOn = true; touchThrustId = touchId; activeTouchMap[touchId] = "thrust"; }
-      else if (touchId === touchThrustId) { touchThrustOn = false; touchThrustId = null; delete activeTouchMap[touchId]; }
-    }
-    if (id === "right") {
-      if (on) { touchRightOn = true; touchRightId = touchId; activeTouchMap[touchId] = "right"; }
-      else if (touchId === touchRightId) { touchRightOn = false; touchRightId = null; delete activeTouchMap[touchId]; }
-    }
-    if (id === "fire") {
-      if (on) { touchFireOn = true; touchFireId = touchId; activeTouchMap[touchId] = "fire"; }
-      else if (touchId === touchFireId) { touchFireOn = false; touchFireId = null; delete activeTouchMap[touchId]; }
-    }
+  function pressStartOrConfirm() {
+    if (state === "attract") { startGame(); return true; }
+    if (state === "dead" && deadPauseTimer <= 0) { toAttract(); return true; }
+    return false;
   }
-
-  /* Resolve a touch event's changedTouches entries against the activeTouchMap.
-      Returns an array of { identifier, buttonId } pairs for all changed touches
-      that match currently-active touch map entries. This handles the case where
-      multiple fingers release/cancel simultaneously — each is resolved to its
-      correct button by matching identifier, not just taking changedTouches[0]. */
-  function resolveTouchIds(e) {
-    const results = [];
-    if (!e.changedTouches || e.changedTouches.length === 0) return results;
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const tid = e.changedTouches[i].identifier;
-      if (activeTouchMap[tid] !== undefined) {
-        results.push({ identifier: tid, buttonId: activeTouchMap[tid] });
-      }
-    }
-    return results;
-  }
-
-  function getTouchId(e) {
-    const resolved = resolveTouchIds(e);
-    if (resolved.length > 0) return resolved[0].identifier;
-    if (e.targetTouches && e.targetTouches.length > 0) return e.targetTouches[0].identifier;
-    return null;
-  }
-
-  function bindTouch(el, id) {
-    el.addEventListener("touchstart", e => {
-      e.preventDefault();
-      const tid = getTouchId(e);
-      setTouch(id, true, tid);
-      initAudio();
-      if (state === "playing") idleTimer = 0;
-    });
-    el.addEventListener("touchend", e => {
-      e.preventDefault();
-      const resolved = resolveTouchIds(e);
-      if (resolved.length > 0) {
-        for (const r of resolved) {
-          if (r.buttonId === id) setTouch(id, false, r.identifier);
-        }
-      } else {
-        const tid = getTouchId(e);
-        setTouch(id, false, tid);
-      }
-    });
-    el.addEventListener("touchcancel", e => {
-      e.preventDefault();
-      const resolved = resolveTouchIds(e);
-      if (resolved.length > 0) {
-        for (const r of resolved) {
-          if (r.buttonId === id) setTouch(id, false, r.identifier);
-        }
-      } else {
-        const tid = getTouchId(e);
-        setTouch(id, false, tid);
-      }
-    });
-
-    /* Pointer Events fallback for non-touch pointers (mice, stylus on tablets in desktop mode). */
-    el.addEventListener("pointerdown", e => {
-      if (e.pointerType === "touch") return;
-      e.preventDefault();
-      setTouch(id, true, e.pointerId);
-      initAudio();
-      if (state === "playing") idleTimer = 0;
-    });
-    el.addEventListener("pointerup", e => {
-      if (e.pointerType === "touch") return;
-      e.preventDefault();
-      setTouch(id, false, e.pointerId);
-    });
-    el.addEventListener("pointercancel", e => {
-      if (e.pointerType === "touch") return;
-      e.preventDefault();
-      setTouch(id, false, e.pointerId);
-    });
-  }
-
-  let inputInitialized = false;
 
   function initInput() {
-    if (inputInitialized) return;
-    inputInitialized = true;
-    window.addEventListener("keydown", e => {
-      keys[e.code] = true;
+    window.addEventListener("keydown", function(e) {
       initAudio();
-      if (state === "playing") idleTimer = 0;
-      if (e.code === 'KeyM') toggleMute();
-      /* High-score clear shortcut: Shift+H or Ctrl+H with confirmation.
-          Removes all stored scores from localStorage and resets the table to empty. */
-      if ((e.shiftKey || e.ctrlKey) && (e.code === 'KeyH')) {
-        e.preventDefault();
-        if (confirm("Clear all high scores? This cannot be undone.")) {
-          highScoreTable.length = 0;
-          saveHighScoreTable();
-          try { localStorage.removeItem("sc2_highscore"); } catch(e) {}
-          highScore = 0;
-        }
-      }
-      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyF', 'Enter'].includes(e.code)) {
-        e.preventDefault();
-      }
+      if (e.code === "Space" || e.code === "ArrowUp" || e.code === "ArrowDown" ||
+          e.code === "ArrowLeft" || e.code === "ArrowRight") e.preventDefault();
+      keys[e.code] = true;
+      if (e.code === "KeyM") toggleMute();
+      if (e.code === "Space" || e.code === "Enter") pressStartOrConfirm();
+      idleTimer = 0;
     });
-    window.addEventListener("keyup",   e => { keys[e.code] = false; });
-
-    /* Canvas tap/pointer for attract screen start (mobile) */
-    canvas.addEventListener("pointerdown", e => {
-      if (state === "attract" || state === "dead") {
+    window.addEventListener("keyup", function(e) { keys[e.code] = false; });
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", function() { setTimeout(resize, 200); });
+    if (canvas) {
+      canvas.addEventListener("pointerdown", function() {
         initAudio();
-        canvasTapped = true;
-        e.preventDefault();
-      }
-      if (state === "playing") {
-        idleTimer = 0;
-        initAudio();
-      }
-    });
-
-    /* iOS Safari: register touchstart on the canvas so tap gestures don't trigger browser chrome (address bar, double-tap zoom). */
-    canvas.addEventListener("touchstart", e => {
-      if (state === "attract" || state === "dead") {
-        e.preventDefault();
-        initAudio();
-      }
-    }, { passive: false });
-
-    /* Attract screen div: tap anywhere to start */
-    attractScreen.addEventListener("touchstart", e => {
-      if (state === "attract") {
-        e.preventDefault();
-        initAudio();
-        canvasTapped = true;
-      }
-    });
-
-    /* Desktop mouse pointer: click on attract overlay starts the game (V17a) */
-    if (attractScreen) {
-      attractScreen.addEventListener("click", () => { initAudio(); canvasTapped = true; });
-    }
-
-    /* Dead overlay div: tap anywhere / click to restart */
-    if (deadOverlay) {
-      deadOverlay.addEventListener("touchstart", e => {
-        if (state === "dead") {
-          e.preventDefault();
-          initAudio();
-          canvasTapped = true;
-        }
-      });
-      deadOverlay.addEventListener("click", e => {
-        if (state === "dead") {
-          initAudio();
-          canvasTapped = true;
-        }
+        if (state === "attract") startGame();
+        else if (state === "dead" && deadPauseTimer <= 0) toAttract();
       });
     }
-
     bindTouch(touchLeft, "left");
-    bindTouch(touchThrust, "thrust");
     bindTouch(touchRight, "right");
+    bindTouch(touchThrust, "thrust");
     bindTouch(touchFire, "fire");
-
-  window._touchLeftOn   = () => touchLeftOn;
-  window._touchThrustOn = () => touchThrustOn;
-  window._touchRightOn  = () => touchRightOn;
-  window._touchFireOn   = () => touchFireOn;
-  window._canvasTapped  = () => canvasTapped;
-  window._touchLeftId   = () => touchLeftId;
-  window._touchFireId   = () => touchFireId;
+    if (muteBtn) muteBtn.addEventListener("pointerdown", function(ev) { ev.preventDefault(); initAudio(); toggleMute(); });
   }
 
   function rotDir() {
-    const leftActive = keys.ArrowLeft || keys.KeyA || touchLeftOn;
-    const rightActive = keys.ArrowRight || keys.KeyD || touchRightOn;
-
-    /* Simultaneous left+right conflict: log and resolve deterministically.
-       Resolution rule: last-input-wins based on which direction was most recently activated.
-       When both are active, the direction whose key/touch was pressed last wins.
-       This is determined by checking which touch lock is most recently set, or falling back to left priority. */
-    if (leftActive && rightActive) {
-      diagnosticLogEntry(`CONFLICT: left+right active — resolving (left=${!!(keys.ArrowLeft || keys.KeyA)}, right=${!!(keys.ArrowRight || keys.KeyD)}, touchL=${touchLeftOn}, touchR=${touchRightOn})`);
-
-      /* Determine last-input-wins: check which direction has the most recent touch activation.
-         If neither has an active touch, prefer left (deterministic fallback). */
-      const lastLeftTouch = touchLeftId !== null;
-      const lastRightTouch = touchRightId !== null;
-
-      if (lastLeftTouch && !lastRightTouch) return -1;
-      if (lastRightTouch && !lastLeftTouch) return 1;
-
-      /* Both have active touches or neither does: prefer the one with a key press.
-         If both have keys, prefer left as deterministic default. */
-      if ((keys.ArrowLeft || keys.KeyA) && !(keys.ArrowRight || keys.KeyD)) return -1;
-      if (!(keys.ArrowLeft || keys.KeyA) && (keys.ArrowRight || keys.KeyD)) return 1;
-
-      /* Both keys and both touches active: deterministic fallback to left. */
-      return -1;
-    }
-
-    return (keys.ArrowLeft || keys.KeyA || touchLeftOn)  ? -1 :
-           (keys.ArrowRight|| keys.KeyD || touchRightOn) ?  1 : 0;
+    let d = 0;
+    if (keys.ArrowLeft || keys.KeyA || touchLeftOn)   d -= 1;
+    if (keys.ArrowRight || keys.KeyD || touchRightOn) d += 1;
+    return d;
   }
   function thrustDir() { return (keys.ArrowUp || keys.KeyW || touchThrustOn) ? 1 : 0; }
-  function fireDir()   { return keys.Space || keys.KeyF || touchFireOn; }
+  function fireHeld()  { return keys.Space || keys.KeyF || touchFireOn; }
 
-  /* ── Vector helpers ─────────────────────────────────── */
-  function dist(a, b) { return Math.hypot(b.x - a.x, b.y - a.y); }
-  function angle(a, b) { return Math.atan2(b.y - a.y, b.x - a.x); }
-
-  /* ── Difficulty scaling helpers (pure, deterministic) ── */
-  /* Cannon fire cooldown in frames. Floor 45 prevents impossible fire rate. */
-  function cannonFireCooldown(level) {
-    return Math.max(45, 120 - level * 8);
+  /* ── Math helpers ──────────────────────────────────────────────────── */
+  function dist(ax, ay, bx, by) { return Math.hypot(bx - ax, by - ay); }
+  function angTo(ax, ay, bx, by) { return Math.atan2(by - ay, bx - ax); }
+  function angDiff(a, b) {
+    let d = a - b;
+    while (d > Math.PI)  d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return d;
+  }
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function wrap(obj) {
+    const m = 14;
+    if (obj.x < -m) obj.x = W + m; else if (obj.x > W + m) obj.x = -m;
+    if (obj.y < -m) obj.y = H + m; else if (obj.y > H + m) obj.y = -m;
   }
 
-  /* Cannon shot speed in px/frame. Cap 6 keeps shots dodgeable. */
-  function cannonShotSpeed(level) {
-    return Math.min(6, 3 + level * 0.4);
-  }
+  /* ── Fidelity constants ────────────────────────────────────────────── */
+  const RING_SEGMENTS = 12;          /* original: 12 sections per ring */
+  const SECTION_HITS  = 2;           /* original: two hits per section */
+  const RING_RADII  = [0.115, 0.152, 0.19]; /* inner, middle, outer (x S) */
+  const RING_DIRS   = [1, -1, 1];   /* oppositely rotating rings */
+  /* Color overlay: rings YELLOW / ORANGE / RED from outer to inner */
+  const RING_COLORS = ["#ff2a2a", "#ff8c1a", "#ffd80a"];
+  const RING_CORES  = ["#ff9a8a", "#ffc38a", "#ffef9a"]; /* hot cores, still tinted */
+  const CORE_COLOR  = "#3ecbff";    /* playfield beams: blue-white */
+  const FUZZ_COLOR  = "#ffffff";    /* fuzzball: white noise */
+  const CORE_RADIUS = 0.052;        /* x S: castle */
+  const CASTLE_POINTS = 1440;       /* original manual: 1440 + extra ship */
+  const SECTION_POINTS = [50, 40, 30]; /* inner/middle/outer — documented choice */
+  const MAX_MINES = 3;              /* original: exactly three sparks */
+  const MINE_ORBIT_FRAMES = 360;    /* mines orbit ~6s, then break loose */
+  const MAX_PLAYER_BULLETS = 2;     /* classic vector-shooter shot limit */
+  const PLAYER_FIRE_CD = 9;
+  const COLLIDE_BAND = 0.016;       /* ring hit band (x S) */
+  const REGEN_ANIM_FRAMES = 50;
+  const COLLAPSE_FRAMES = 130;
+  const IDLE_TIMEOUT = 1800;
+  const DEAD_PAUSE_FRAMES = 150;
 
-  /* Core aim turn rate in rad/frame. Cap 0.07 keeps tracking readable. */
-  function coreTurnRate(level) {
-    return Math.min(0.07, 0.03 + level * 0.005);
-  }
+  /* ── Difficulty (per level + continuous intra-level ramp) ─────────── */
+  function ringRotSpeed(level)        { return Math.min(0.014, 0.006 + level * 0.0008); }
+  function coreTurnRate(level)        { return Math.min(0.045, 0.018 + level * 0.0025); }
+  function cannonFireCooldown(level)  { return Math.max(55, 130 - level * 8); }
+  function fuzzSpeed(level)           { return Math.min(5.2, 2.4 + level * 0.28); }
+  function mineSpeed(level, ramp)     { return Math.min(5.0, (0.85 + level * 0.14) * (1 + ramp)); }
+  function mineTurnRate(level, ramp)  { return Math.min(0.045, (0.014 + level * 0.002) * (1 + ramp)); }
 
-  /* Shield ring rotation multiplier (rad/ms). Cap 0.006 keeps gaps readable. */
-  function shieldRotationSpeed(level) {
-    return Math.min(0.006, 0.003 + level * 0.0003);
-  }
+  /* ── Game state ────────────────────────────────────────────────────── */
+  let state = "attract"; /* attract | playing | dying | castleDead | dead */
+  let score = 0, lives = 3, level = 1;
+  let levelFrames = 0;        /* drives the continuous intra-level ramp */
+  let ramp = 0;               /* speed multiplier growth within a level */
+  let idleTimer = 0;
+  let deadPauseTimer = 0;
+  let dyingTimer = 0;
+  let collapseTimer = 0;
+  let collapseFactor = 1;    /* rings shrink 1 -> 0 when the castle dies */
+  let introTimer = 0;
+  let gameOverScore = 0;
 
-/* Enemy base speed in px/frame. Cap 4 keeps movement tractable. */
-function enemyBaseSpeed(level) {
-  return Math.min(4, 1.5 + level * 0.3);
-}
-
-/* Enemy spawn interval in frames. Floor 45 keeps continuous spawn restrained. */
-function spawnInterval(level) {
-  return Math.max(45, 240 - level * 12);
-}
-
-/* Core mine spawn interval in frames. Mines orbit the core (Star Castle signature). */
-function coreMineInterval(level) {
-  return Math.max(120, 240 - level * 12);
-}
-
-  /* ── Game state ─────────────────────────────────────── */
-let state = "attract"; // attract | playing | coreDestruction | dead | levelTransition | dying
-
-/* Game mode: "fidelity" matches original three mine-threat design;
-   "arcade" enables additional enemy types and continuous extra spawns. */
-let gameMode = "fidelity"; // fidelity | arcade
-
-/* Idle timeout: after IDLE_TIMEOUT frames of no input during gameplay,
-   return to attract mode (cabinet coin-drop behavior). */
-const IDLE_TIMEOUT = 1800; // 30s at 60fps
-const DEAD_PAUSE_FRAMES = 120; // 2s at 60fps — fixed "FREE PLAY" freeze before input accepted
-let idleTimer = 0;
-let score = 0, lives = 3, level = 1;
-let transitionTimer = 0;
-let coreDestructionTimer = 0;
-let debrisSpawned = false;
-let deathTimer = 0;
-let deadPauseTimer = 0; // deterministic freeze before input accepted on dead state
-let deathExplosionX = 0, deathExplosionY = 0;
-let spawnTimer = 0;
-let continuousSpawnIndex = 0;
-let coreMineTimer = 0;
-let shieldAngle = 0; /* frame-accumulated shield rotation state (deterministic, frame-rate independent) */
-
-  /* ── Attract mode: deterministic card rotation ──────── */
-  /* Card order: 0=Title, 1=HighScore, 2=Instructions, 3=Showcase
-     Durations in frames at 60fps. Total cycle = 900 frames (15s). */
-const ATTRACT_CARD_DURATIONS = [180, 180, 240, 300];
-const ATTRACT_TOTAL_CYCLE  = 900;
-let attractCard       = 0;
-let attractCardTimer  = 0;
-let showcaseAngle     = 0;
-/* Deterministic attract-frame counter: drives all idle animations without Date.now().
-   This is the basis for cabinet-style deterministic presentation. */
-let attractFrame      = 0;
   let highScore = 0;
-  try { highScore = parseInt(localStorage.getItem("sc2_highscore"), 10) || 0; } catch(e) {}
-
-  /* High-score table: top N entries, persisted to localStorage.
-     Cabinet-authentic: shows ranked scores on the attract card. */
+  try { highScore = parseInt(localStorage.getItem("sc2_highscore"), 10) || 0; } catch (e) {}
   const HIGH_SCORE_SLOTS = 5;
   let highScoreTable = [];
   try {
     const saved = JSON.parse(localStorage.getItem("sc2_hst") || "[]");
     if (Array.isArray(saved)) {
-      highScoreTable = saved.filter(function(entry) {
-        if (typeof entry === "number") return entry >= 0;
-        if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-          var s = entry.score, n = entry.name;
-          if (typeof s === "number" && s >= 0) {
-            return typeof n !== "string" || n.length === 0 ? true : (typeof n === "string");
-          }
-        }
-        return false;
-      }).slice(0, HIGH_SCORE_SLOTS);
+      highScoreTable = saved.filter(function(x) { return typeof x === "number" && x >= 0; }).slice(0, HIGH_SCORE_SLOTS);
     }
-  } catch(e) {}
-
+  } catch (e) {}
   function saveHighScoreTable() {
-    try { localStorage.setItem("sc2_hst", JSON.stringify(highScoreTable)); } catch(e) {}
+    try { localStorage.setItem("sc2_hst", JSON.stringify(highScoreTable)); } catch (e) {}
   }
-
   function insertHighScore(s) {
-    if (!s || s <= 0) return;
     highScoreTable.push(s);
-    highScoreTable.sort((a, b) => b - a);
+    highScoreTable.sort(function(a, b) { return b - a; });
     if (highScoreTable.length > HIGH_SCORE_SLOTS) highScoreTable.length = HIGH_SCORE_SLOTS;
+    if (s > highScore) highScore = s;
+    try { localStorage.setItem("sc2_highscore", String(highScore)); } catch (e) {}
     saveHighScoreTable();
-    highScore = highScoreTable.length ? highScoreTable[0] : 0;
-    try { localStorage.setItem("sc2_highscore", String(highScore)); } catch(e) {}
   }
 
-  function saveHighScore() {
-    insertHighScore(score);
-  }
+  /* ── Attract: deterministic card rotation ──────────────────────────── */
+  const ATTRACT_CARD_DURATIONS = [300, 300, 300, 360];
+  let attractCard = 0, attractCardTimer = 0, attractFrame = 0;
 
-function resetAttract() {
-    attractCard = 0;
-    attractCardTimer = 0;
-    showcaseAngle = 0;
-    attractFrame = 0;
-    setAttractScreenVisible(true);
-}
-
-function advanceAttractCard() {
-    attractFrame++;
+  function advanceAttractCard() {
     attractCardTimer++;
     if (attractCardTimer >= ATTRACT_CARD_DURATIONS[attractCard]) {
       attractCardTimer = 0;
       attractCard = (attractCard + 1) % ATTRACT_CARD_DURATIONS.length;
     }
-    /* Showcase angle rotates continuously during showcase card */
-    if (attractCard === 3) {
-      showcaseAngle += 0.02;
-    }
-}
-
-  /* ── Player ─────────────────────────────────────────── */
-  const REGEN_ANIM_FRAMES = 40;
-
-  const player = {
-    x: 0, y: 0, vx: 0, vy: 0, angle: -Math.PI / 2, rotVel: 0,
-    thrusting: false,
-    rings: [
-      { health: 100, destroyed: false, breachFlash: 0 },
-      { health: 100, destroyed: false, breachFlash: 0 },
-      { health: 100, destroyed: false, breachFlash: 0 },
-    ],
-    invincible: 0, alive: true,
-    fireCooldown: 0,
-    shieldRegenTimer: 0,
-    shieldRegenAmount: 1.5,
-    regenAnimFrames: 0,
-    regenOldRadii: null,
-  };
-
-  function resetPlayer() {
-    player.x = W / 2;
-    player.y = H / 2;
-    player.vx = 0; player.vy = 0;
-    player.angle = -Math.PI / 2;
-    player.rotVel = 0;
-    for (let i = 0; i < SHIELD_RINGS.length; i++) {
-      player.rings[i].health = 100;
-      player.rings[i].destroyed = false;
-      player.rings[i].breachFlash = 0;
-    }
-    player.invincible = 30; // frames (~0.5s at 60fps)
-    player.alive = true;
-    player.fireCooldown = 0;
-    player.regenAnimFrames = 0;
-    player.regenOldRadii = null;
-    thrustTimer = 0;
-    /* Clear touch locks on respawn */
-    touchLeftId = touchThrustId = touchRightId = touchFireId = null;
-    touchLeftOn = touchThrustOn = touchRightOn = touchFireOn = false;
   }
 
-  /* ── Projectiles ────────────────────────────────────── */
-  let bullets = [];
+  /* ── Entities ──────────────────────────────────────────────────────── */
+  const player = {
+    x: 0, y: 0, vx: 0, vy: 0, angle: -Math.PI / 2,
+    alive: true, fireCooldown: 0, invincible: 0, thrusting: false,
+  };
 
+  const castle = {
+    x: 0, y: 0, angle: -Math.PI / 2,
+    fireCooldown: 0, locked: false, alive: true,
+  };
+
+  /* Rings: index 0 = inner, 1 = middle, 2 = outer.
+     Each section health: 2 intact, 1 damaged, 0 destroyed. */
+  function freshSections() {
+    const a = [];
+    for (let i = 0; i < RING_SEGMENTS; i++) a.push(SECTION_HITS);
+    return a;
+  }
+  function freshRing(i) { return { rot: 0, sections: freshSections(), bloom: 0 }; }
+
+  let rings = [freshRing(0), freshRing(1), freshRing(2)];
+
+  let bullets = [];     /* player shots */
+  let fuzzballs = [];   /* castle fuzzball shots */
+  let mines = [];       /* exactly three, restored on regen */
+  let particles = [];
+  let debris = [];
+
+  function ringRadius(i) {
+    const r = rings[i];
+    if (r.bloom > 0) {
+      const t = 1 - r.bloom / REGEN_ANIM_FRAMES;
+      return S * RING_RADII[i] * (0.15 + 0.85 * t);
+    }
+    return S * RING_RADII[i] * collapseFactor;
+  }
+  function ringLive(i) {
+    let n = 0;
+    const sec = rings[i].sections;
+    for (let k = 0; k < RING_SEGMENTS; k++) if (sec[k] > 0) n++;
+    return n;
+  }
+  function ringBulwark(i) { return ringLive(i) > 0 && rings[i].bloom <= 0; }
+  function coreRadius() { return S * CORE_RADIUS * collapseFactor; }
+
+  function resetCastle() {
+    castle.x = W / 2;
+    castle.y = H / 2;
+    castle.angle = -Math.PI / 2;
+    castle.fireCooldown = cannonFireCooldown(level);
+    castle.locked = false;
+    castle.alive = true;
+    fuzzballs.length = 0;
+  }
+
+  function resetPlayer(spawnAtEdge) {
+    if (spawnAtEdge) {
+      /* Respawn away from the castle: pick a far corner */
+      const corners = [[W * 0.12, H * 0.14], [W * 0.88, H * 0.14], [W * 0.12, H * 0.86], [W * 0.88, H * 0.86]];
+      const c = corners[Math.floor(Math.random() * corners.length)];
+      player.x = c[0]; player.y = c[1];
+    }
+    player.vx = 0; player.vy = 0;
+    player.angle = angTo(player.x, player.y, W / 2, H / 2);
+    player.alive = true;
+    player.fireCooldown = 0;
+    player.invincible = 120;
+    player.thrusting = false;
+    thrustTimer = 0;
+    setTouch("left", false); setTouch("right", false);
+    setTouch("thrust", false); setTouch("fire", false);
+  }
+
+  /* Mines are launched from the core and orbit the castle (signature). */
+  function spawnMine(i) {
+    const a = (Math.PI * 2 * (i || 0)) / MAX_MINES + attractFrame * 0.01;
+    const r = coreRadius() + 6;
+    const sp = mineSpeed(level, ramp);
+    mines.push({
+      x: castle.x + Math.cos(a) * r,
+      y: castle.y + Math.sin(a) * r,
+      vx: -Math.sin(a) * sp, vy: Math.cos(a) * sp,
+      age: 0, loose: false, orbitDir: 1, size: 0.008,
+      angle: 0,
+    });
+    sfxMineLaunch();
+  }
+
+  function resetMines() {
+    mines.length = 0;
+    for (let i = 0; i < MAX_MINES; i++) spawnMine(i);
+  }
+
+  function resetRings() {
+    rings = [freshRing(0), freshRing(1), freshRing(2)];
+  }
+
+  /* ── Player firing ─────────────────────────────────────────────────── */
   function fireBullet() {
     if (player.fireCooldown > 0) return;
-    player.fireCooldown = 7;
-    const tipX = player.x + Math.cos(player.angle) * 16;
-    const tipY = player.y + Math.sin(player.angle) * 16;
+    if (bullets.length >= MAX_PLAYER_BULLETS) return;
+    const speed = 8.2;
+    const nx = Math.cos(player.angle), ny = Math.sin(player.angle);
     bullets.push({
-      x: tipX, y: tipY,
-      vx: Math.cos(player.angle) * 14 + player.vx * 0.2,
-      vy: Math.sin(player.angle) * 14 + player.vy * 0.2,
+      x: player.x + nx * 12, y: player.y + ny * 12,
+      px: player.x + nx * 12, py: player.y + ny * 12,
+      vx: player.vx + nx * speed, vy: player.vy + ny * speed,
       life: 90,
     });
+    player.fireCooldown = PLAYER_FIRE_CD;
     sfxShoot();
   }
 
-  /* ── Central Core / Cannon ─────────────────────────── */
-  const core = {
-    x: 0, y: 0,
-    angle: 0,
-    fireCooldown: 0,
-    muzzleFlash: 0,
-    locked: false,
-    alive: true,
-  };
-  let cannonShots = [];
-
-  function resetCore() {
-    core.x = W / 2;
-    core.y = 60 + safeInsets.top;
-    core.angle = Math.PI / 2;
-    core.fireCooldown = 0;
-    core.muzzleFlash = 0;
-    core.locked = false;
-    core.alive = true;
-    cannonShots.length = 0;
-    coreMineTimer = coreMineInterval(level);
+  /* ── Ray / crossing geometry ───────────────────────────────────────── */
+  /* Section index covering an absolute field angle for a given ring. */
+  function sectionAt(ringIdx, absAngle) {
+    const ring = rings[ringIdx];
+    const seg = (Math.PI * 2) / RING_SEGMENTS;
+    let a = absAngle - ring.rot;
+    while (a < 0) a += Math.PI * 2;
+    while (a >= Math.PI * 2) a -= Math.PI * 2;
+    return Math.floor(a / seg) % RING_SEGMENTS;
   }
 
-   /* Check if all shield rings have a gap at the given angle.
-        Returns true if a clear path exists through all rings.
-        Iterates outermost-to-innermost to match checkShieldCollision ordering.
-        Uses the same segArc (0.55 coverage) as checkShieldCollision so the
-        cannon can fire through the 45% intra-segment gaps, making shield
-        gaps a genuine threat rather than an absolute barrier.
-        During regen animation, skips the new ring (index 0) to prevent
-        the core from firing through a ring that hasn't fully formed. */
-  function findShieldGap(toAngle, shieldAngle) {
-    const inRegenAnim = player.regenAnimFrames > 0 && player.regenCollRadii;
-    for (let ri = SHIELD_RINGS.length - 1; ri >= 0; ri--) {
-      const ring = SHIELD_RINGS[ri];
-      const rs = player.rings[ri];
-      if (rs.destroyed) continue;
-      if (inRegenAnim && ri === 0) continue;
-      const segAngle = (Math.PI * 2) / ring.segments;
-      const segArc = segAngle * 0.55;
-      let normAngle = toAngle - shieldAngle;
-      while (normAngle < 0) normAngle += Math.PI * 2;
-      while (normAngle >= Math.PI * 2) normAngle -= Math.PI * 2;
-      const segIndex = Math.min(ring.segments - 1, Math.floor((normAngle + 1e-9) / segAngle));
-      const segOffset = normAngle - segIndex * segAngle;
-      const activeSegs = Math.floor((rs.health / 100) * ring.segments);
-      if (segIndex < activeSegs && segOffset < segArc + 1e-9) return false;
+  /* Is an outward ray from the castle at absAngle clear of live sections? */
+  function rayClear(absAngle) {
+    for (let i = 0; i < 3; i++) {
+      if (ringBulwark(i) && rings[i].sections[sectionAt(i, absAngle)] > 0) return false;
     }
     return true;
   }
 
-  /* Fire a cannon shot from the core toward the player.
-      Uses leading prediction: estimates where the player will be when the shot
-      arrives, so shots track moving targets rather than current position.
-      Only fires when the cannon's aim is within fireAngleTol of the predicted
-      target angle AND all rings have an aligned gap at that angle.
-      This makes the cannon feel responsive (it tracks and leads) while remaining
-      fair (player can dodge by breaking line-of-sight with shields). */
-  function fireCannonShot() {
-    if (!core.alive) return;
-    if (core.fireCooldown > 0) return;
-
-    /* Leading prediction: estimate player position at shot arrival time.
-       travelFrames = distance / shotSpeed; predictedPos = playerPos + playerVel * travelFrames.
-       Falls back to current player position if player is stationary or very close. */
-    const dx = player.x - core.x;
-    const dy = player.y - core.y;
-    const distToPlayer = Math.hypot(dx, dy);
-    const speed = cannonShotSpeed(level);
-    const travelFrames = distToPlayer / speed;
-    const leadX = player.x + player.vx * travelFrames;
-    const leadY = player.y + player.vy * travelFrames;
-    const playerSpeed = Math.hypot(player.vx, player.vy);
-    const leadPredict = playerSpeed > 0.1 || distToPlayer < 150;
-
-    const targetX = leadPredict ? leadX : player.x;
-    const targetY = leadPredict ? leadY : player.y;
-    const targetAngle = Math.atan2(targetY - core.y, targetX - core.x);
-
-    /* Alignment tolerance: cannon only fires when its aim is within fireAngleTol
-        of the target angle. Tighter tolerance (0.04) makes firing more deliberate
-        and gives the player clearer read on when a shot is imminent.
-        Barrel visibly tracks via core.angle, and fires only when locked on target. */
-    const fireAngleTol = 0.04;
-    let diff = targetAngle - core.angle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    if (Math.abs(diff) > fireAngleTol) return;
-
-    if (!findShieldGap(targetAngle, shieldAngle)) return;
-
-    core.fireCooldown = cannonFireCooldown(level);
-    core.muzzleFlash = 6; /* frames of visible muzzle flash */
-    cannonShots.push({
-      x: core.x, y: core.y,
-      vx: Math.cos(targetAngle) * speed,
-      vy: Math.sin(targetAngle) * speed,
-      life: 300,
-      size: 8, // Larger cannon shot (original: distinctive large fireball)
-    });
-    sfxMine();
-  }
-
-  /* Update core tracking: rotate toward the player with lock-on preview.
-      The barrel smoothly rotates via coreTurnRate. A "locked" flag triggers when
-      the barrel is within LOCK_TOL of firing alignment (ready to fire if gaps align).
-      This gives the player readable feedback that the cannon is about to fire. */
-  const LOCK_TOL = 0.08;
-
-  function updateCore() {
-    if (!core.alive) return;
-    const targetAngle = angle(core, player);
-    let diff = targetAngle - core.angle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    const turnRate = coreTurnRate(level);
-    if (Math.abs(diff) > turnRate) {
-      core.angle += Math.sign(diff) * turnRate;
-    } else {
-      core.angle = targetAngle;
-    }
-
-    /* Lock-on preview: barrel is "locked" when within LOCK_TOL (2x fireAngleTol)
-       of the target angle. Signals imminent firing when gaps align. */
-    core.locked = Math.abs(diff) <= LOCK_TOL;
-
-    if (core.fireCooldown > 0) core.fireCooldown--;
-    if (core.muzzleFlash > 0) core.muzzleFlash--;
-    fireCannonShot();
-
-    /* Core mine spawning (Star Castle signature: orbiting mines) */
-    coreMineTimer--;
-    if (coreMineTimer <= 0) {
-      coreMineTimer = coreMineInterval(level);
-      spawnCoreMine();
-    }
-  }
-
-  /* ── Enemies / Mines ───────────────────────────────── */
-  let enemies = [];
-
-  function spawnEnemy(type) {
-    const side = Math.floor(Math.random() * 4);
-    let x, y;
-    const margin = 60;
-    if (side === 0) { x = Math.random() * W; y = -margin; }
-    else if (side === 1) { x = W + margin; y = Math.random() * H; }
-    else if (side === 2) { x = Math.random() * W; y = H + margin; }
-    else { x = -margin; y = Math.random() * H; }
-
-    const baseSpeed = enemyBaseSpeed(level);
-    let speed, hp, size, color;
-
-    if (type === "mine") {
-      speed = baseSpeed * 0.6;
-      hp = 1; size = 12; color = "#ff4444";
-    } else if (type === "chaser") {
-      speed = baseSpeed;
-      hp = 2; size = 14; color = "#ff8800";
-    } else if (type === "fast") {
-      speed = baseSpeed * 1.6;
-      hp = 1; size = 10; color = "#ffcc00";
-    } else if (gameMode === "arcade") {
-      /* Arcade mode only: heavy enemy beyond original three-mine-threat */
-      speed = baseSpeed * 1.2;
-      hp = 3; size = 16; color = "#ff0088";
-    } else {
-      /* Fallback in fidelity mode: treat as fast */
-      speed = baseSpeed * 1.6;
-      hp = 1; size = 10; color = "#ffcc00";
-    }
-
-    const angleToPlayer = Math.atan2(player.y - y, player.x - x);
-    enemies.push({
-      x, y,
-      vx: Math.cos(angleToPlayer) * speed,
-      vy: Math.sin(angleToPlayer) * speed,
-      hp, maxHp: hp, size, color, type,
-      angle: 0,
-    });
-  }
-
-  function spawnWave() {
-    const count = 2 + level;
-    for (let i = 0; i < count; i++) {
-      const r = Math.random();
-      if (r < 0.30) spawnEnemy("mine");
-      else if (r < 0.70) spawnEnemy("chaser");
-      else spawnEnemy("fast");
-    }
-  }
-
-  /* Spawn a mine that orbits the core (Star Castle signature mechanic).
-     Mine spawns at orbitRadius from core center with perpendicular velocity
-     to create circular orbit. Homing behavior still applies toward player. */
-  function spawnCoreMine() {
-    if (!core.alive) return;
-    const MAX_CORE_MINES = 3;
-    const activeCoreMines = enemies.filter(e => e.coreSpawned).length;
-    if (activeCoreMines >= MAX_CORE_MINES) return;
-    const orbitRadius = 100;
-    const a = Math.random() * Math.PI * 2;
-    const orbitSpeed = (orbitRadius * Math.PI * 2) / 180;
-    enemies.push({
-      x: core.x + Math.cos(a) * orbitRadius,
-      y: core.y + Math.sin(a) * orbitRadius,
-      vx: -Math.sin(a) * orbitSpeed,
-      vy: Math.cos(a) * orbitSpeed,
-      hp: 1, maxHp: 1, size: 12, color: "#ffff00", type: "mine", coreSpawned: true,
-      angle: 0,
-    });
-  }
-
-  /* ── Particles ─────────────────────────────────────── */
-  let particles = [];
-
-  /* Seeded PRNG (LCG) for deterministic visual sequences */
-  function seededRandom(seed) {
-    let s = seed;
-    return function() {
-      s = (s * 16807 + 0) % 2147483647;
-      return (s - 1) / 2147483646;
-    };
-  }
-
-  /* Deterministic core-destruction debris burst */
-  function spawnCoreDebris(x, y) {
-    const rng = seededRandom(42);
-    for (let i = 0; i < 24; i++) {
-      const a = rng() * Math.PI * 2;
-      const s = rng() * 4 + 2;
-      particles.push({
-        x, y,
-        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
-        life: 60 + Math.floor(rng() * 30), maxLife: 90,
-        color: rng() > 0.5 ? "#ff8800" : "#ff4444",
-        size: rng() * 3 + 2,
-      });
-    }
-  }
-
-  function spawnParticles(x, y, color, count) {
-    for (let i = 0; i < count; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const s = Math.random() * 3 + 1;
-      particles.push({
-        x, y,
-        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
-        life: 30 + Math.random() * 25, maxLife: 55,
-        color, size: Math.random() * 3 + 1,
-      });
-    }
-  }
-
-  /* ── Shield rings (outermost=ring 2, innermost=ring 0) ───────────── */
-  /* Each ring has per-depth visual attributes: intensity controls bloom weight,
-     glow is the shadow blur radius for that ring's ghost pass. Outer rings are
-     brighter/larger so the player reads "outer = primary defense" instantly. */
-  const SHIELD_RINGS = [
-    { radius: 38, segments: 12, speed: 0.04, color: "#55ff55", intensity: 0.30, glow: 6 },
-    { radius: 52, segments: 12, speed: -0.03, color: "#33dd33", intensity: 0.65, glow: 10 },
-    { radius: 68, segments: 12, speed: 0.025, color: "#11bb11", intensity: 0.95, glow: 14 },
-  ];
-
-  /* Gap tick: short perpendicular line drawn at each arc endpoint. Mirrors the
-     1980 Star Castle cabinet where gaps between arcs were sharp directional cues. */
-  const GAP_TICK_LEN = 5;
-
-
-  /* ── Stars (background) ─────────────────────────────── */
-  let stars = [];
-  regenerateStars();
-
-  /* ── Level transition / end-game helpers ─────────────── */
-  function startLevel() {
-    level++;
-    state = "levelTransition";
-    transitionTimer = 120;
-    sfxLevelUp();
-    /* Core reset deferred to levelTransition->playing handler;
-       keeps core hidden during transition screen. */
-  }
-
-  /* End-game: deterministic freeze-then-input sequence.
-     Freezes all gameplay for DEAD_PAUSE_FRAMES frames, then unlocks input
-     (same as cabinet "FREE PLAY" freeze before accepting coin-drop). */
-  function endGame() {
-    state = "dead";
-    deadPauseTimer = DEAD_PAUSE_FRAMES;
-    deadFrame = 0;
-    saveHighScore();
-    populateDeadOverlay();
-  }
-
-  /* ── Collision helpers ─────────────────────────────── */
-  function wrap(obj) {
-    if (obj.x < -50) obj.x += W + 100;
-    if (obj.x > W + 50) obj.x -= W + 100;
-    if (obj.y < -50) obj.y += H + 100;
-    if (obj.y > H + 50) obj.y -= H + 100;
-  }
-
-  /* Arc/segment shield collision: processes rings outermost-to-innermost.
-      Returns ring index (0..N-1) if blocked by an active segment, -1 if passes through.
-      Destroyed rings are skipped, enforcing the breach rule: inner rings cannot be
-      damaged until the outermost active ring is completely destroyed.
-      When fromOutside is true (cannon shots), rings with gaps at the current angle
-      allow the projectile to pass through to inner rings rather than stopping.
-      During regen animation, uses captured collision radii to prevent gaps. */
-  function checkShieldCollision(obj, fromOutside) {
-    const allDestroyed = player.rings.every(rs => rs.destroyed);
-    if (allDestroyed) return -1;
-    const dx = obj.x - player.x;
-    const dy = obj.y - player.y;
-    const d = Math.hypot(dx, dy);
-    let relAngle = Math.atan2(dy, dx);
-    if (relAngle < 0) relAngle += Math.PI * 2;
-    const inRegenAnim = player.regenAnimFrames > 0 && player.regenCollRadii;
-    for (let ri = SHIELD_RINGS.length - 1; ri >= 0; ri--) {
-      const ring = SHIELD_RINGS[ri];
-      const rs = player.rings[ri];
-      if (rs.destroyed) continue;
-      /* During regen animation, skip new ring (index 0) for collision;
-         use captured collision radii for shifted rings to prevent gaps. */
-      if (inRegenAnim && ri === 0) continue;
-      const collRadius = inRegenAnim && ri > 0 ? player.regenCollRadii[ri - 1] : ring.radius;
-      if (Math.abs(d - collRadius) > 8) continue;
-      const segAngle = (Math.PI * 2) / ring.segments;
-      const segArc = segAngle * 0.55;
-      let normAngle = relAngle - shieldAngle;
-      while (normAngle < 0) normAngle += Math.PI * 2;
-      while (normAngle >= Math.PI * 2) normAngle -= Math.PI * 2;
-      const segIndex = Math.min(ring.segments - 1, Math.floor((normAngle + 1e-9) / segAngle));
-      const segOffset = normAngle - segIndex * segAngle;
-      const activeSegs = Math.floor((rs.health / 100) * ring.segments);
-      if (segIndex < activeSegs && segOffset < segArc + 1e-9) return ri;
-      if (fromOutside) continue;
+  /* Did a moving point cross a ring radius this frame over a live section?
+     Returns ring index or -1. prevR/newR = radii before/after the step. */
+  function crossedLiveSection(ringIdx, absAngle, prevR, newR) {
+    const R = ringRadius(ringIdx);
+    if (!ringBulwark(ringIdx)) return -1;
+    const band = S * COLLIDE_BAND;
+    /* near the ring radius AND moving across it */
+    if (Math.abs(prevR - R) > band && Math.abs(newR - R) > band) {
+      const crossed = (prevR - R) * (newR - R) < 0;
+      if (!crossed) return -1;
+    } else if (Math.abs(newR - R) > band) {
       return -1;
     }
-    return -1;
+    const segIdx = sectionAt(ringIdx, absAngle);
+    const ring = rings[ringIdx];
+    if (ring.sections[segIdx] <= 0) return -1;
+    /* Also reject near-gap cases: angle inside the swept section arc. */
+    const seg = (Math.PI * 2) / RING_SEGMENTS;
+    let a = absAngle - ring.rot;
+    while (a < 0) a += Math.PI * 2;
+    while (a >= Math.PI * 2) a -= Math.PI * 2;
+    const off = a - Math.floor(a / seg) * seg;
+    const arcCover = seg * 0.8; /* 80% arc per section, 20% gap */
+    if (off > arcCover) return -1;
+    return ringIdx;
   }
 
-  /* Ring regeneration: when the outermost active ring is destroyed,
-    shift remaining inner rings outward and spawn a fresh ring at the core.
-    Only fires when there is at least one surviving ring to shift.
-    Visual feedback: dramatic REGEN_ANIM_FRAMES animation shows
-    existing rings expanding outward with glow burst while a new inner ring
-    blooms from the core center (original Star Castle cabinet cascade). */
-  function tryRegenRings(destroyedIndex) {
-    let isOutermostActive = true;
-    for (let i = destroyedIndex + 1; i < SHIELD_RINGS.length; i++) {
-      if (!player.rings[i].destroyed) {
-        isOutermostActive = false;
-        break;
-      }
-    }
-    if (!isOutermostActive) return;
-    if (!player.rings.some(rs => !rs.destroyed)) return;
-
-    /* Capture current logical radii for collision during animation.
-       During animation, collision uses these radii (pre-shift positions)
-       so no projectiles can bypass the shield coverage. The new ring at
-       index 0 is skipped for collision until animation completes. */
-    const collRadii = SHIELD_RINGS.map(r => r.radius);
-
-    /* Perform the logical shift immediately */
-    for (let i = destroyedIndex; i > 0; i--) {
-      player.rings[i] = { health: player.rings[i-1].health, destroyed: player.rings[i-1].destroyed, breachFlash: player.rings[i-1].breachFlash };
-    }
-    player.rings[0] = { health: 100, destroyed: false, breachFlash: 0 };
-
-    /* Start visual animation: rings interpolate from captured radii to target */
-    player.regenAnimFrames = REGEN_ANIM_FRAMES;
-    player.regenCollRadii = collRadii;
-
-    sfxShieldRegen();
-    spawnParticles(player.x, player.y, "#33ff33", 24);
-
-    /* Dramatic cascade: spawn extra glow particles at each ring's position */
-    for (let ri = 0; ri < SHIELD_RINGS.length; ri++) {
-      if (!player.rings[ri].destroyed) {
-        spawnParticles(player.x, player.y, SHIELD_RINGS[ri].color, 12);
-      }
-    }
-  }
-
-  /* ── Update ─────────────────────────────────────────── */
-  function update() {
-    if (state === "attract") {
-      advanceAttractCard();
-      return;
-    }
-
-    if (state === "levelTransition") {
-      transitionTimer--;
-      updateParticles();
-      if (transitionTimer <= 0) {
-        /* Next-level reset: deterministic state transition.
-           resetPlayer() resets position, invincibility, and ALL shield rings
-           to 100% health (shield regeneration between levels).
-           resetCore() scales HP for the new level.
-           Score is preserved across the transition (no timer races). */
-        state = "playing";
-        idleTimer = 0;
-        resetPlayer();
-        bullets.length = 0;
-        enemies.length = 0;
-        spawnWave();
-        spawnTimer = spawnInterval(level);
-        resetCore();
-      }
-      return;
-    }
-
-    if (state === "coreDestruction") {
-      /* One-time debris burst: flag-based (not timer-equals) to prevent
-         frame-skip races. Debris spawns exactly once per core destruction. */
-      if (!debrisSpawned) {
-        debrisSpawned = true;
-        spawnCoreDebris(core.x, core.y);
-        /* Purge any remaining core-spawned mines */
-        for (let i = enemies.length - 1; i >= 0; i--) {
-          if (enemies[i].coreSpawned) enemies.splice(i, 1);
-        }
-      }
-      coreDestructionTimer--;
-      updateParticles();
-      if (coreDestructionTimer <= 0) {
-        startLevel();
-      }
-      return;
-    }
-
-    if (state === "dying") {
-      deathTimer--;
-      updateParticles();
-      if (deathTimer <= 0) {
-        if (lives > 0) {
-          resetPlayer();
-          idleTimer = 0;
-          state = "playing";
-        } else {
-          endGame();
-        }
-      }
-      return;
-    }
-
-    if (state !== "playing") return;
-
-    /* Paused: freeze all updates, skip frame processing */
-    if (state === "paused") return;
-
-    /* Advance shield rotation state per frame — deterministic, frame-rate independent.
-        Original Star Castle cabinet used fixed per-frame angular step for shield rings;
-        Date.now() timestamps make the gameplay non-deterministic and FPS-dependent. */
-    shieldAngle += shieldRotationSpeed(level);
-
-    /* Idle timeout: increment on every playing frame; reset on any input.
-        After IDLE_TIMEOUT frames with no input, return to attract mode. */
-    idleTimer++;
-    if (idleTimer >= IDLE_TIMEOUT) {
-      idleTimer = 0;
-      saveHighScore();
-      resetAttract();
-      state = "attract";
-      setHUDVisible(false);
-      setDeadOverlayVisible(false);
-      attractScreen.classList.remove("hidden");
-      return;
-    }
-
-    /* Player rotation — Asteroids-era inertia (acceleration + friction) */
-    const rotSpeed = 0.065;
-    const ROT_ACCEL  = 0.012;   // rad/frame² when turning (builds rotational momentum)
-    const ROT_FRICTION = 0.85;  // rad/frame decay factor on release (cabinet-era drift)
-
-    if (rotDir() !== 0) {
-      player.rotVel += rotDir() * ROT_ACCEL;
-      if (player.rotVel >  rotSpeed) player.rotVel =  rotSpeed;
-      if (player.rotVel < -rotSpeed) player.rotVel = -rotSpeed;
+  /* ── Shield damage / regeneration ──────────────────────────────────── */
+  function hitSection(ringIdx, segIdx) {
+    const ring = rings[ringIdx];
+    const before = ring.sections[segIdx];
+    if (before <= 0) return;
+    ring.sections[segIdx] = before - 1;
+    if (ring.sections[segIdx] === 1) {
+      sfxRingHit();
+      spawnSparks(ringIdx, segIdx, 4);
     } else {
-      player.rotVel *= ROT_FRICTION;
-      if (Math.abs(player.rotVel) < 0.001) player.rotVel = 0;
+      /* Section destroyed */
+      score += SECTION_POINTS[ringIdx];
+      sfxRingBreak();
+      spawnSparks(ringIdx, segIdx, 10);
+      if (ringLive(ringIdx) === 0) onRingDestroyed(ringIdx);
     }
-    player.angle += player.rotVel;
-
-    /* Thrust — punchier acceleration for responsive control */
-    const thrust = 0.18;
-    if (thrustDir()) {
-      player.vx += Math.cos(player.angle) * thrust;
-      player.vy += Math.sin(player.angle) * thrust;
-      player.thrusting = true;
-      sfxThrust();
-    } else {
-      player.thrusting = false;
-    }
-
-    /* Friction — cabinet-era drift: decays noticeably but retains momentum */
-    player.vx *= 0.992;
-    player.vy *= 0.992;
-
-    /* Max speed cap */
-    const speed = Math.hypot(player.vx, player.vy);
-    if (speed > 7) {
-      const scale = 7 / speed;
-      player.vx *= scale;
-      player.vy *= scale;
-    }
-
-    /* Move */
-    player.x += player.vx;
-    player.y += player.vy;
-    wrap(player);
-
-    /* Invincibility countdown */
-    if (player.invincible > 0) player.invincible--;
-
-    /* Breach flash countdown */
-    for (const rs of player.rings) {
-      if (rs.breachFlash > 0) rs.breachFlash--;
-    }
-
-    /* Core tracking and firing */
-    updateCore();
-
-    /* Fire */
-    if (player.fireCooldown > 0) player.fireCooldown--;
-    if (fireDir()) fireBullet();
-
-    /* Max 4 simultaneous bullets (player + cannon combined) — original cabinet limit */
-    const totalProjectiles = bullets.length + cannonShots.length;
-    while (totalProjectiles > 4 && bullets.length > 0) {
-      bullets.shift();
-    }
-
-    /* Pause: 'P' or Escape freezes all updates */
-    if (keys.KeyP || keys.Escape) {
-      if (!window._paused) {
-        window._paused = true;
-        state = "paused";
-      } else if (state === "paused") {
-        window._paused = false;
-        state = "playing";
-      }
-    }
-
-    /* Shield regen */
-    player.shieldRegenTimer++;
-    if (player.shieldRegenTimer >= 60) {
-      player.shieldRegenTimer = 0;
-      for (const rs of player.rings) {
-        if (!rs.destroyed && rs.health < 100) {
-          rs.health = Math.min(100, rs.health + player.shieldRegenAmount);
-          rs.breachFlash = 0;
-        }
-      }
-    }
-
-    /* Shield regen animation countdown */
-    if (player.regenAnimFrames > 0) {
-      player.regenAnimFrames--;
-      if (player.regenAnimFrames <= 0) {
-        player.regenCollRadii = null;
-      }
-    }
-
-    /* Bullets */
-    for (let i = bullets.length - 1; i >= 0; i--) {
-      const b = bullets[i];
-      b.x += b.vx; b.y += b.vy;
-      wrap(b);
-      b.life--;
-      if (b.life <= 0) { bullets.splice(i, 1); continue; }
-
-      let bulletConsumed = false;
-
-      /* Bullet vs enemies */
-      for (let j = enemies.length - 1; j >= 0; j--) {
-        const e = enemies[j];
-        if (dist(b, e) < e.size + 4) {
-          e.hp--;
-          bullets.splice(i, 1);
-          bulletConsumed = true;
-          spawnParticles(e.x, e.y, e.color, 6);
-          if (e.hp <= 0) {
-            score += e.type === "mine" ? 10 : e.type === "fast" ? 25 : 15;
-            spawnParticles(e.x, e.y, e.color, 14);
-            sfxExplosion();
-            enemies.splice(j, 1);
-          } else {
-            sfxHit();
-          }
-          break;
-        }
-      }
-      if (bulletConsumed) continue;
-
-      /* Bullet vs core — one-shot kill (original: single bullet through gap destroys cannon) */
-      if (core.alive && dist(b, core) < 20) {
-        bullets.splice(i, 1);
-        bulletConsumed = true;
-        spawnParticles(core.x, core.y, "#ff4444", 8);
-        sfxExplosion();
-        core.alive = false;
-        score += 5000;
-        lives = Math.min(9, lives + 1); // Extra ship for cannon destruction (original)
-        /* Purge core-spawned mines on core death to prevent leak */
-        for (let k = enemies.length - 1; k >= 0; k--) {
-          if (enemies[k].coreSpawned) {
-            spawnParticles(enemies[k].x, enemies[k].y, "#ffff00", 4);
-            enemies.splice(k, 1);
-          }
-        }
-        state = "coreDestruction";
-        coreDestructionTimer = 90;
-        debrisSpawned = false;
-        cannonShots.length = 0;
-        break;
-      }
-      if (bulletConsumed) continue;
-
-      /* Bullet vs player (arc-based shield check, outer-to-inner breach) */
-      if (dist(b, player) < 76) {
-        const hitRing = checkShieldCollision(b);
-        if (hitRing >= 0) {
-          const rs = player.rings[hitRing];
-          const segsBefore = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
-          rs.health = Math.max(0, rs.health - 4.17);
-          const segsAfter = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
-          const justDestroyed = rs.health <= 0 && !rs.destroyed;
-          if (rs.health <= 0) rs.destroyed = true;
-          rs.breachFlash = 30;
-          bullets.splice(i, 1);
-          sfxShield();
-          if (justDestroyed) sfxBreach();
-          spawnParticles(player.x, player.y, "#33ff33", 12);
-          if (justDestroyed) tryRegenRings(hitRing);
-          /* Award 100 points per destroyed segment (Fix 8) */
-          const segsLost = segsBefore - segsAfter;
-          if (segsLost > 0) score += segsLost * 100;
-        } else if (dist(b, player) < 18) {
-          bullets.splice(i, 1);
-          hitPlayer();
-        }
-      }
-    }
-    if (state !== "playing") return;
-
-    /* Cannon shots (fired from core, travel toward player) */
-    for (let i = cannonShots.length - 1; i >= 0; i--) {
-      const c = cannonShots[i];
-      c.x += c.vx; c.y += c.vy;
-      c.life--;
-      if (c.life <= 0) { cannonShots.splice(i, 1); continue; }
-
-      /* Cannon shot vs player shields — blocked by own rings (original: can shoot yourself) */
-      if (dist(c, player) < 100) {
-        const hitRing = checkShieldCollision(c, false); // false = blocked by own rings
-        if (hitRing >= 0) {
-          const rs = player.rings[hitRing];
-          const segsBefore = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
-          rs.health = Math.max(0, rs.health - 4.17);
-          const segsAfter = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
-          const justDestroyed = rs.health <= 0 && !rs.destroyed;
-          if (rs.health <= 0) rs.destroyed = true;
-          rs.breachFlash = 30;
-          cannonShots.splice(i, 1);
-          sfxShield();
-          if (justDestroyed) sfxBreach();
-          spawnParticles(player.x, player.y, "#33ff33", 10);
-          if (justDestroyed) tryRegenRings(hitRing);
-        } else if (dist(c, player) < 18) {
-          cannonShots.splice(i, 1);
-          hitPlayer();
-        }
-      }
-    }
-
-    /* Enemies */
-    for (let i = enemies.length - 1; i >= 0; i--) {
-      const e = enemies[i];
-
-      /* Homing behavior */
-      if (e.type === "mine" || e.type === "chaser") {
-        const a = angle(e, player);
-        const turnRate = e.type === "mine" ? 0.025 : 0.018;
-        e.angle = a;
-        const turnSpeed = Math.min(e.vx * 0.15, turnRate);
-        e.vx += Math.cos(a) * turnSpeed;
-        e.vy += Math.sin(a) * turnSpeed;
-      }
-
-      /* Chaser acceleration toward player */
-      if (e.type === "chaser") {
-        const a = angle(e, player);
-        e.vx += Math.cos(a) * 0.02;
-        e.vy += Math.sin(a) * 0.02;
-      }
-
-      /* Move */
-      e.x += e.vx; e.y += e.vy;
-      wrap(e);
-
-      /* Enemy vs player (arc-based shield check, outer-to-inner breach) */
-      if (dist(e, player) < e.size + 76) {
-        const hitRing = checkShieldCollision(e);
-        if (hitRing >= 0) {
-          const rs = player.rings[hitRing];
-          const segsBefore = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
-          rs.health = Math.max(0, rs.health - 4.17);
-          const segsAfter = Math.floor((rs.health / 100) * SHIELD_RINGS[hitRing].segments);
-          const justDestroyed = rs.health <= 0 && !rs.destroyed;
-          if (rs.health <= 0) rs.destroyed = true;
-          rs.breachFlash = 30;
-          spawnParticles(e.x, e.y, e.color, 8);
-          sfxExplosion();
-          enemies.splice(i, 1);
-          sfxShield();
-          if (justDestroyed) sfxBreach();
-          spawnParticles(player.x, player.y, "#33ff33", 12);
-          if (justDestroyed) tryRegenRings(hitRing);
-        } else if (dist(e, player) < e.size + 16) {
-          spawnParticles(e.x, e.y, e.color, 8);
-          sfxExplosion();
-          enemies.splice(i, 1);
-          hitPlayer();
-        }
-      }
-
-      /* Enemy vs bullets (already handled above) */
-    }
-
-    /* Continuous enemy spawning — fidelity mode: only core mines (original Star Castle had no edge-spawning enemies) */
-    spawnTimer--;
-    if (spawnTimer <= 0 && gameMode === "arcade") {
-      spawnTimer = spawnInterval(level);
-      const cycle = ["mine", "chaser", "fast"];
-      spawnEnemy(cycle[continuousSpawnIndex % 3]);
-      continuousSpawnIndex++;
-    }
-
-    /* No level cap — original Star Castle is endless (Fix 16) */
-
-    updateParticles();
   }
 
+  /* Full-ring destruction: only the OUTERMOST surviving ring regenerates.
+     Middle expands to outer, inner to middle, brand-new ring blooms at the
+     core, and the mines are restored (original cabinet behavior). */
+  function onRingDestroyed(ringIdx) {
+    if (ringIdx !== 2) return; /* inner/middle holes persist until cascade */
+    /* Cascade shift: outer = old middle, middle = old inner, inner = fresh */
+    for (let i = 2; i > 0; i--) {
+      rings[i].sections = rings[i - 1].sections.slice();
+      rings[i].rot = rings[i - 1].rot;
+    }
+    rings[0].sections = freshSections();
+    rings[0].bloom = REGEN_ANIM_FRAMES;
+    /* Mines restored when rings regenerate */
+    resetMines();
+    sfxRegen();
+  }
+
+  /* ── Cannon: tracks always, fires only through clear fire-lines ───── */
+  function updateCastle() {
+    if (!castle.alive) return;
+    const target = angTo(castle.x, castle.y, player.x, player.y);
+    const d = angDiff(target, castle.angle);
+    const rate = coreTurnRate(level) * (1 + ramp * 0.5);
+    if (Math.abs(d) > rate) castle.angle += Math.sign(d) * rate;
+    else castle.angle = target;
+    castle.locked = Math.abs(d) < 0.06;
+
+    if (castle.fireCooldown > 0) { castle.fireCooldown--; return; }
+    /* Fire rule: clear line of fire along the tracked aim angle.
+       With the inner ring down there is always a clear line. */
+    const innerDown = !ringBulwark(0);
+    if (innerDown || rayClear(castle.angle)) {
+      const speed = fuzzSpeed(level);
+      const exposed = 1 - liveSectionFraction();
+      fuzzballs.push({
+        x: castle.x + Math.cos(castle.angle) * (coreRadius() + 4),
+        y: castle.y + Math.sin(castle.angle) * (coreRadius() + 4),
+        vx: Math.cos(castle.angle) * speed,
+        vy: Math.sin(castle.angle) * speed,
+        size: 0.012 + exposed * 0.016, /* fuzzball grows as defenses fall */
+        life: 420, seed: Math.random() * 1000,
+      });
+      castle.fireCooldown = cannonFireCooldown(level);
+      sfxFuzzball();
+    }
+  }
+
+  function liveSectionFraction() {
+    let live = 0;
+    for (let i = 0; i < 3; i++) live += ringLive(i);
+    return live / (3 * RING_SEGMENTS);
+  }
+
+  /* ── Mines: orbit the castle, then break loose and home in ─────────── */
+  function updateMines() {
+    const sp = mineSpeed(level, ramp);
+    const turn = mineTurnRate(level, ramp);
+    const orbitR = coreRadius() + S * 0.06;
+    for (let i = 0; i < mines.length; i++) {
+      const m = mines[i];
+      m.age++;
+      m.angle += 0.08;
+      if (!m.loose) {
+        /* Orbit: steer perpendicular around the castle at fixed radius */
+        const toC = angTo(m.x, m.y, castle.x, castle.y);
+        const want = toC + Math.PI / 2 * m.orbitDir;
+        const cur = Math.atan2(m.vy, m.vx);
+        const step = clamp(angDiff(want, cur), -0.05, 0.05);
+        const na = cur + step;
+        m.vx = Math.cos(na) * sp; m.vy = Math.sin(na) * sp;
+        /* Pull back if drifted far from orbit radius */
+        const dC = dist(m.x, m.y, castle.x, castle.y);
+        if (dC > orbitR + 20) {
+          const inward = angTo(m.x, m.y, castle.x, castle.y);
+          m.vx = lerp(m.vx, Math.cos(inward) * sp, 0.1);
+          m.vy = lerp(m.vy, Math.sin(inward) * sp, 0.1);
+        }
+        if (m.age > MINE_ORBIT_FRAMES) m.loose = true;
+      } else {
+        /* Loose: home in on the player */
+        const want = angTo(m.x, m.y, player.x, player.y);
+        const cur = Math.atan2(m.vy, m.vx);
+        const step = clamp(angDiff(want, cur), -turn, turn);
+        const na = cur + step;
+        m.vx = Math.cos(na) * sp; m.vy = Math.sin(na) * sp;
+      }
+      m.x += m.vx; m.y += m.vy;
+      m.size = 0.008 + Math.min(0.006, m.age * 0.00002);
+      wrap(m);
+    }
+  }
+
+  /* ── Particles & debris (vector style: short bright line segments) ── */
+  function spawnSparks(ringIdx, segIdx, n) {
+    const R = ringRadius(ringIdx);
+    const seg = (Math.PI * 2) / RING_SEGMENTS;
+    const a = rings[ringIdx].rot + segIdx * seg + seg / 2;
+    const cx = castle.x + Math.cos(a) * R;
+    const cy = castle.y + Math.sin(a) * R;
+    burstParticles(cx, cy, RING_COLORS[ringIdx], n);
+  }
+
+  function burstParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 0.5 + Math.random() * 3;
+      particles.push({
+        x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        life: 25 + Math.floor(Math.random() * 25), maxLife: 50, color: color,
+      });
+    }
+  }
+
+  function updateParticles(list) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const p = list[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.97; p.vy *= 0.97;
+      p.life--;
+      if (p.life <= 0) list.splice(i, 1);
+    }
+  }
+
+  /* ── Death / castle collapse / level flow ─────────────────────────── */
   function hitPlayer() {
-    if (player.invincible > 0) return;
-    if (state !== "playing") return;
-
+    if (!player.alive || player.invincible > 0 || state !== "playing") return;
+    player.alive = false;
     lives--;
     sfxDeath();
-    deathExplosionX = player.x;
-    deathExplosionY = player.y;
-    player.alive = false;
-    spawnParticles(deathExplosionX, deathExplosionY, "#ff4444", 30);
-    deathTimer = 90;
+    burstParticles(player.x, player.y, CORE_COLOR, 26);
+    dyingTimer = 110;
     state = "dying";
   }
 
-  function updateParticles() {
-    for (let i = particles.length - 1; i >= 0; i--) {
-      const p = particles[i];
-      p.x += p.vx; p.y += p.vy;
-      p.life--;
-      if (p.life <= 0) particles.splice(i, 1);
-    }
-  }
-
-  /* ── Draw helpers ───────────────────────────────────── */
-  function glow(color, radius) {
-    ctx.shadowColor = color;
-    ctx.shadowBlur = radius;
-  }
-
-  function noGlow() {
-    ctx.shadowColor = "transparent";
-    ctx.shadowBlur = 0;
-  }
-
-  /* ── HUD ───────────────────────────────────────────── */
-  function drawHUD() {
-    const yOff = safeInsets.top;
-    const xOff = safeInsets.right;
-
-    ctx.textAlign = "left";
-
-    /* Score — primary hierarchy: ghost-line bloom + crisp phosphor */
-    const scoreSize = Math.floor(H * 0.038);
-    ctx.font = `bold ${scoreSize}px "Courier New", monospace`;
-    /* Ghost-line pass for phosphor bloom */
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 3;
-    ctx.shadowColor = "#aaccff";
-    ctx.shadowBlur = 12;
-    ctx.globalAlpha = 0.15;
-    ctx.fillText(`SCORE: ${score}`, 20, 38 + yOff);
-    ctx.globalAlpha = 1;
-    /* Primary phosphor: crisp white text */
-    ctx.fillStyle = "#ffffff";
-    glow("#aaccff", 6);
-    ctx.fillText(`SCORE: ${score}`, 20, 38 + yOff);
-
-    /* Level — secondary, smaller, muted */
-    ctx.font = `bold ${Math.floor(H * 0.024)}px "Courier New", monospace`;
-    ctx.fillStyle = "#88aacc";
-    glow("#6699cc", 3);
-    ctx.fillText(`LEVEL: ${level}`, 20, 68 + yOff);
-
-    /* Lives — tertiary, warm accent */
-    ctx.font = `bold ${Math.floor(H * 0.022)}px "Courier New", monospace`;
-    ctx.fillStyle = "#ff4444";
-    glow("#cc0000", 4);
-    let livesText = "LIVES: ";
-    for (let i = 0; i < lives; i++) livesText += "★ ";
-    ctx.fillText(livesText, 20, 98 + yOff);
-
-    /* Shield bars (per-ring) — wireframe outlines, more vertical room */
-    if (player.alive) {
-      const barW = Math.floor(W * 0.15);
-      const barH = 8;
-      const bx = W - barW - 20 - xOff;
-      const by = 32 + yOff;
-
-      for (let ri = 0; ri < SHIELD_RINGS.length; ri++) {
-        const rs = player.rings[ri];
-        const ry = by + ri * (barH + 5);
-
-        if (rs.destroyed) {
-          ctx.setLineDash([3, 3]);
-          ctx.strokeStyle = "#444466";
-          ctx.lineWidth = 1;
-          ctx.shadowColor = "transparent";
-          ctx.shadowBlur = 0;
-          ctx.strokeRect(bx, ry, barW, barH);
-          ctx.setLineDash([]);
-        } else {
-          const pct = rs.health / 100;
-          ctx.strokeStyle = pct > 0.5 ? "#33ff33" : pct > 0.25 ? "#22dd22" : "#ff6666";
-          ctx.lineWidth = 1.5;
-          ctx.shadowColor = ctx.strokeStyle;
-          ctx.shadowBlur = 4;
-          ctx.strokeRect(bx, ry, barW * pct, barH);
-        }
-      }
-
-      noGlow();
-      ctx.fillStyle = "#88aacc";
-      ctx.font = `bold ${Math.floor(H * 0.018)}px "Courier New", monospace`;
-      ctx.textAlign = "right";
-      ctx.fillText(`SHIELD`, bx + barW, by - 4);
-    }
-
-    ctx.textAlign = "left";
-  }
-
-  /* ── Attract screen ────────────────────────────────── */
-  function drawAttract() {
-    ctx.textAlign = "center";
-
-    const titleSize = Math.floor(W * 0.14);
-    ctx.font = `bold ${titleSize}px "Courier New", monospace`;
-
-    /* Always draw the game title at top — ghost-line bloom + crisp phosphor */
-    ctx.textAlign = "center";
-    /* Ghost-line bloom pass */
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 5;
-    ctx.shadowColor = "#00aaff";
-    ctx.shadowBlur = 20;
-    ctx.globalAlpha = 0.15;
-    ctx.strokeText("STAR CASTLE", W / 2, H * 0.13);
-    ctx.globalAlpha = 1;
-    /* Primary phosphor */
-    glow("#00aaff", 40);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText("STAR CASTLE", W / 2, H * 0.13);
-
-    /* Subtitle "2" — ghost-line bloom */
-    ctx.strokeStyle = "#ff88cc";
-    ctx.lineWidth = 4;
-    ctx.shadowColor = "#ff4488";
-    ctx.shadowBlur = 16;
-    ctx.globalAlpha = 0.15;
-    const twoSize = Math.floor(W * 0.07);
-    ctx.font = `bold ${twoSize}px "Courier New", monospace`;
-    ctx.strokeText("2", W / 2, H * 0.21);
-    ctx.globalAlpha = 1;
-    glow("#ff4488", 25);
-    ctx.font = `bold ${twoSize}px "Courier New", monospace`;
-    ctx.fillStyle = "#ff88cc";
-    ctx.fillText("2", W / 2, H * 0.21);
-
-    noGlow();
-
-    /* Draw card-specific content */
-    if (attractCard === 0) {
-      drawAttractTitle();
-    } else if (attractCard === 1) {
-      drawAttractHighScore();
-    } else if (attractCard === 2) {
-      drawAttractInstructions();
-    } else if (attractCard === 3) {
-      drawAttractShowcase();
-    }
-
-    /* Cabinet-authentic start prompt: INSERT COIN + PRESS START
-        Dual-line prompt with distinct blink phases — deterministic, frame-driven. */
-    const promptBlink = Math.sin((attractFrame / 60) * Math.PI * 2) * 0.5 + 0.5;
-    attractPrompt.style.opacity = promptBlink;
-
-    const promptSize = Math.floor(W * 0.03);
-    ctx.font = `bold ${promptSize}px "Courier New", monospace`;
-    ctx.textAlign = "center";
-
-    /* INSERT COIN line: always visible, steady glow */
-    ctx.fillStyle = "#ffcc00";
-    glow("#ffaa00", 14);
-    ctx.fillText("INSERT COIN", W / 2, H * 0.80);
-
-    /* PRESS START line: blinks, ghost-line bloom for emphasis */
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 3;
-    ctx.shadowColor = "#aaccff";
-    ctx.shadowBlur = 12;
-    ctx.globalAlpha = 0.12;
-    ctx.strokeText("PRESS START OR TAP", W / 2, H * 0.86);
-    ctx.globalAlpha = 0.4 + promptBlink * 0.6;
-    ctx.fillStyle = "#ffffff";
-    glow("#aaccff", 15);
-    ctx.fillText("PRESS START OR TAP", W / 2, H * 0.86);
-    ctx.globalAlpha = 1;
-    noGlow();
-    ctx.textAlign = "left";
-
-    /* Start on space/tap */
-    if (keys.Space || keys.Enter || touchFireOn || canvasTapped) {
-      canvasTapped = false;
-      startGame();
-    }
-  }
-
-  function drawAttractTitle() {
-    ctx.textAlign = "center";
-    ctx.font = `${Math.floor(W * 0.028)}px "Courier New", monospace`;
-    ctx.fillStyle = "#6688aa";
-    ctx.fillText("A Vector Space Shooter", W / 2, H * 0.42);
-  }
-
-  function drawAttractHighScore() {
-    const hsSize = Math.floor(W * 0.055);
-    ctx.font = `bold ${hsSize}px "Courier New", monospace`;
-    ctx.textAlign = "center";
-    /* Ghost-line bloom */
-    ctx.strokeStyle = "#ffcc00";
-    ctx.lineWidth = 3;
-    ctx.shadowColor = "#ffaa00";
-    ctx.shadowBlur = 14;
-    ctx.globalAlpha = 0.15;
-    ctx.strokeText("HIGH SCORE", W / 2, H * 0.28);
-    ctx.globalAlpha = 1;
-    glow("#ffaa00", 12);
-    ctx.fillStyle = "#ffcc00";
-    ctx.fillText("HIGH SCORE", W / 2, H * 0.28);
-    noGlow();
-
-    /* Ranked score table: top N entries */
-    const entrySize = Math.floor(W * 0.038);
-    ctx.font = `bold ${entrySize}px "Courier New", monospace`;
-    ctx.textAlign = "center";
-    const lineH = Math.floor(W * 0.048);
-    const tableStartY = H * 0.36;
-
-    /* Cabinet-style: pad scores to 6 digits for consistent column width */
-    const scoreFmt = s => String(s).padStart(6, "0");
-
-    for (let i = 0; i < HIGH_SCORE_SLOTS; i++) {
-      const y = tableStartY + i * lineH;
-      if (i < highScoreTable.length) {
-        const isTop = i === 0;
-        ctx.fillStyle = isTop ? "#ffcc00" : "#aaddff";
-        if (isTop) {
-          glow("#ffaa00", 8);
-          ctx.font = `bold ${Math.floor(entrySize * 1.2)}px "Courier New", monospace`;
-        } else {
-          noGlow();
-          ctx.font = `bold ${entrySize}px "Courier New", monospace`;
-        }
-        ctx.fillText(`${i + 1}. ${scoreFmt(highScoreTable[i])}`, W / 2, y);
-      } else {
-        ctx.fillStyle = "#334455";
-        noGlow();
-        ctx.font = `bold ${entrySize}px "Courier New", monospace`;
-        ctx.fillText(`${i + 1}. ---`, W / 2, y);
+  function killCastle() {
+    castle.alive = false;
+    score += CASTLE_POINTS;          /* original: 1440 + extra ship */
+    lives = Math.min(9, lives + 1);
+    sfxCastleBoom();
+    setTimeout(sfxExtraShip, 900);
+    /* Violent explosion + ring collapse animation */
+    burstParticles(castle.x, castle.y, FUZZ_COLOR, 40);
+    burstParticles(castle.x, castle.y, CORE_COLOR, 24);
+    const seg = (Math.PI * 2) / RING_SEGMENTS;
+    for (let ri = 0; ri < 3; ri++) {
+      for (let si = 0; si < RING_SEGMENTS; si++) {
+        if (rings[ri].sections[si] > 0 && Math.random() < 0.5) spawnSparks(ri, si, 2);
       }
     }
-    noGlow();
-    ctx.textAlign = "left";
+    bullets.length = 0;
+    fuzzballs.length = 0;
+    collapseTimer = COLLAPSE_FRAMES;
+    collapseFactor = 1;
+    state = "castleDead";
   }
 
-  function drawAttractInstructions() {
-    ctx.textAlign = "center";
-    const fontSize = Math.floor(W * 0.028);
-    ctx.font = `bold ${fontSize}px "Courier New", monospace`;
-    /* Ghost-line bloom */
-    ctx.strokeStyle = "#aaddff";
-    ctx.lineWidth = 3;
-    ctx.shadowColor = "#6699cc";
-    ctx.shadowBlur = 12;
-    ctx.globalAlpha = 0.15;
-    ctx.strokeText("INSTRUCTIONS", W / 2, H * 0.28);
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = "#aaddff";
-    glow("#6699cc", 6);
-    ctx.fillText("INSTRUCTIONS", W / 2, H * 0.28);
-    noGlow();
-
-    ctx.font = `${Math.floor(W * 0.02)}px "Courier New", monospace`;
-    ctx.fillStyle = "#88aacc";
-    const lineH = Math.floor(W * 0.026);
-    const startY = H * 0.38;
-    ctx.fillText("← → or A D  :  Rotate", W / 2, startY);
-    ctx.fillText("↑ or W       :  Thrust", W / 2, startY + lineH);
-    ctx.fillText("SPACE or F   :  Fire", W / 2, startY + lineH * 2);
-
-    ctx.fillStyle = "#668899";
-    ctx.font = `${Math.floor(W * 0.016)}px "Courier New", monospace`;
-    ctx.fillText("Enemy ships attack from the edges — destroy them.", W / 2, startY + lineH * 4);
-    ctx.fillText("Destroy the central cannon to clear each level.", W / 2, startY + lineH * 5);
-    ctx.fillText("Green shield rings rotate — aim for the gaps.", W / 2, startY + lineH * 6);
-    ctx.fillText("The core fires through shield gaps — dodge its shots.", W / 2, startY + lineH * 7);
+  function startLevel(nextLevel) {
+    level = nextLevel;
+    levelFrames = 0; ramp = 0;
+    resetCastle();
+    resetRings();
+    resetMines();
+    bullets.length = 0; fuzzballs.length = 0;
+    resetPlayer(false);
+    player.x = W / 2; player.y = H * 0.82;
+    player.angle = -Math.PI / 2;
+    introTimer = 100;
+    state = "playing";
+    sfxLevelIntro();
   }
 
-  function drawAttractShowcase() {
-    /* Rotating ship with shield rings — pure vector art, no gameplay.
-       Uses per-ring intensity/glow so the showcase mirrors gameplay fidelity:
-       outer ring glows brightest, inner ring is subtle. Gap ticks mark openings. */
-    const cx = W / 2;
-    const cy = H * 0.48;
-
-    /* Shield rings rotating with ghost-line bloom */
-    const shieldAngle = showcaseAngle;
-    for (let ri = 0; ri < SHIELD_RINGS.length; ri++) {
-      const ring = SHIELD_RINGS[ri];
-      const segments = ring.segments;
-
-      /* Ghost-line bloom pass (per-ring intensity + glow) */
-      ctx.strokeStyle = ring.color;
-      ctx.lineWidth = 3 * ring.intensity;
-      ctx.shadowColor = ring.color;
-      ctx.shadowBlur = 12 * ring.intensity;
-      ctx.globalAlpha = 0.15 * ring.intensity;
-      for (let i = 0; i < segments; i++) {
-        const a = shieldAngle + (i / segments) * Math.PI * 2;
-        const startA = a;
-        const endA = a + (Math.PI * 2 / segments) * 0.70;
-        ctx.beginPath();
-        ctx.arc(cx, cy, ring.radius, startA, endA);
-        ctx.stroke();
-      }
-
-      /* Primary phosphor pass (per-ring glow) */
-      ctx.strokeStyle = ring.color;
-      ctx.lineWidth = 1.5;
-      ctx.shadowColor = ring.color;
-      ctx.shadowBlur = 4 * (0.5 + ring.intensity);
-
-      for (let i = 0; i < segments; i++) {
-        const a = shieldAngle + (i / segments) * Math.PI * 2;
-        const startA = a;
-        const endA = a + (Math.PI * 2 / segments) * 0.70;
-        ctx.beginPath();
-        ctx.arc(cx, cy, ring.radius, startA, endA);
-        ctx.stroke();
-      }
-
-      /* Gap ticks: short perpendicular line at each segment end */
-      const segArc = (Math.PI * 2 / segments) * 0.70;
-      ctx.strokeStyle = ring.color;
-      ctx.lineWidth = 1;
-      ctx.shadowColor = ring.color;
-      ctx.shadowBlur = 3;
-      ctx.globalAlpha = 0.5 * ring.intensity;
-      for (let i = 0; i < segments; i++) {
-        const a = shieldAngle + (i / segments) * Math.PI * 2;
-        const endAngle = a + segArc;
-        const tx = cx + Math.cos(endAngle) * ring.radius;
-        const ty = cy + Math.sin(endAngle) * ring.radius;
-        const radNX = Math.cos(endAngle) * GAP_TICK_LEN;
-        const radNY = Math.sin(endAngle) * GAP_TICK_LEN;
-        ctx.beginPath();
-        ctx.moveTo(tx - radNX, ty - radNY);
-        ctx.lineTo(tx + radNX, ty + radNY);
-        ctx.stroke();
-      }
-    }
-    noGlow();
-
-    /* Orbiting core mines — pulsing beacon circles with bloom (deterministic pulse) */
-    for (let mi = 0; mi < 3; mi++) {
-      const mA = showcaseAngle * 0.8 + (mi / 3) * Math.PI * 2;
-      const mR = 80;
-      const mx = cx + Math.cos(mA) * mR;
-      const my = cy + Math.sin(mA) * mR;
-      /* Deterministic pulse driven by attractFrame, phase-offset per mine */
-      const pulse = 0.7 + 0.3 * Math.sin((attractFrame / 60) * Math.PI * 2 + (mi * 2.1));
-      const beaconR = 10 * pulse;
-
-      /* Ghost-line bloom */
-      ctx.strokeStyle = "#ffff00";
-      ctx.lineWidth = 4;
-      ctx.shadowColor = "#ffff00";
-      ctx.shadowBlur = 14;
-      ctx.globalAlpha = 0.12;
-      ctx.beginPath();
-      ctx.arc(mx, my, beaconR, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-
-      /* Primary wireframe */
-      ctx.strokeStyle = "#ffff00";
-      ctx.lineWidth = 2;
-      ctx.shadowColor = "#ffff00";
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      ctx.arc(mx, my, beaconR, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 1;
-      ctx.shadowColor = "#ffffff";
-      ctx.shadowBlur = 3;
-      ctx.beginPath();
-      ctx.arc(mx, my, 2, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = "#ffaa00";
-      ctx.lineWidth = 1;
-      ctx.shadowColor = "#ff8800";
-      ctx.shadowBlur = 4;
-      ctx.beginPath();
-      ctx.arc(mx, my, beaconR + 3, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    noGlow();
-
-    /* Ship body rotating slowly — white phosphor with bloom */
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(showcaseAngle * 0.5);
-
-    /* Ghost-line bloom pass */
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 3.5;
-    ctx.shadowColor = "#aaddff";
-    ctx.shadowBlur = 14;
-    ctx.globalAlpha = 0.12;
-    ctx.beginPath();
-    ctx.moveTo(18, 0);
-    ctx.lineTo(-12, -10);
-    ctx.lineTo(-6, 0);
-    ctx.lineTo(-12, 10);
-    ctx.closePath();
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-
-    /* Primary phosphor: crisp white wireframe */
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 1.5;
-    ctx.shadowColor = "#aaddff";
-    ctx.shadowBlur = 6;
-    ctx.beginPath();
-    ctx.moveTo(18, 0);
-    ctx.lineTo(-12, -10);
-    ctx.lineTo(-6, 0);
-    ctx.lineTo(-12, 10);
-    ctx.closePath();
-    ctx.stroke();
-
-    /* Wing detail lines */
-    ctx.strokeStyle = "#aaddff";
-    ctx.lineWidth = 1;
-    ctx.shadowColor = "#88bbdd";
-    ctx.shadowBlur = 3;
-    ctx.beginPath();
-    ctx.moveTo(-6, 0);
-    ctx.lineTo(-14, -8);
-    ctx.moveTo(-6, 0);
-    ctx.lineTo(-14, 8);
-    ctx.stroke();
-
-    /* Cockpit detail */
-    ctx.strokeStyle = "#88ccff";
-    ctx.lineWidth = 1;
-    ctx.shadowBlur = 2;
-    ctx.beginPath();
-    ctx.moveTo(8, 0);
-    ctx.lineTo(16, 0);
-    ctx.stroke();
-
-    noGlow();
-    ctx.restore();
-
-    /* Label */
-    ctx.textAlign = "center";
-    ctx.font = `${Math.floor(W * 0.018)}px "Courier New", monospace`;
-    ctx.fillStyle = "#556688";
-    ctx.fillText("CORE MINES ORBIT THE CASTLE", W / 2, H * 0.65);
+  function endGame() {
+    gameOverScore = score;
+    insertHighScore(score);
+    populateDeadOverlay();
+    deadPauseTimer = DEAD_PAUSE_FRAMES;
+    state = "dead";
   }
 
-  /* ── Dying sequence: explosion + reserve/lives feedback ─ */
-  function drawDying() {
-    /* Explosion particles — warm phosphor sparks */
-    for (const p of particles) {
-      const alpha = p.life / p.maxLife;
-      ctx.strokeStyle = p.color;
-      ctx.lineWidth = 1.5;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 4;
-      ctx.globalAlpha = alpha;
-      const len = p.size * alpha;
-      ctx.beginPath();
-      ctx.moveTo(p.x - len, p.y);
-      ctx.lineTo(p.x + len, p.y);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-    noGlow();
-
-    /* Vector ship explosion at captured position */
-    const progress = 1 - deathTimer / 90;
-    const expSize = 20 + progress * 40;
-    ctx.save();
-    ctx.translate(deathExplosionX, deathExplosionY);
-
-    /* Ghost-line bloom for explosion */
-    ctx.strokeStyle = "#ff6644";
-    ctx.lineWidth = 4;
-    ctx.shadowColor = "#ff4422";
-    ctx.shadowBlur = 14;
-    ctx.globalAlpha = 0.15;
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(a) * expSize, Math.sin(a) * expSize);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-
-    /* Expanding wireframe lines — warm phosphor */
-    ctx.strokeStyle = "#ff6644";
-    ctx.lineWidth = 2;
-    ctx.shadowColor = "#ff4422";
-    ctx.shadowBlur = 8;
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(a) * expSize, Math.sin(a) * expSize);
-      ctx.stroke();
-    }
-
-    /* Expanding circle with bloom */
-    ctx.strokeStyle = "#ff8866";
-    ctx.lineWidth = 1.5;
-    ctx.shadowColor = "#ff6644";
-    ctx.shadowBlur = 4;
-    ctx.beginPath();
-    ctx.arc(0, 0, expSize * 0.7, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.restore();
-    noGlow();
-
-    /* RESERVE / LIVES feedback — ghost-line bloom + crisp phosphor */
-    ctx.textAlign = "center";
-    const resSize = Math.floor(W * 0.05);
-    ctx.font = `bold ${resSize}px "Courier New", monospace`;
-    /* Ghost-line bloom */
-    ctx.strokeStyle = "#ff4444";
-    ctx.lineWidth = 3;
-    ctx.shadowColor = "#cc0000";
-    ctx.shadowBlur = 14;
-    ctx.globalAlpha = 0.15;
-    ctx.strokeText("RESERVE", W / 2, H * 0.68);
-    ctx.globalAlpha = 1;
-    /* Primary phosphor */
-    ctx.fillStyle = "#ff4444";
-    glow("#cc0000", 10);
-    ctx.fillText("RESERVE", W / 2, H * 0.68);
-    noGlow();
-
-    /* Remaining lives as star indicators */
-    ctx.font = `${Math.floor(W * 0.03)}px "Courier New", monospace`;
-    ctx.fillStyle = "#aaddff";
-    let livesDisplay = "";
-    for (let i = 0; i < lives; i++) livesDisplay += "★ ";
-    ctx.fillText(livesDisplay || "—", W / 2, H * 0.75);
-
-    drawHUD();
-  }
-
-  /* Populate dead overlay content once on entry (avoids per-frame DOM thrashing) */
-  function populateDeadOverlay() {
-    if (!deadOverlay) return;
-    setDeadOverlayVisible(true);
-    deadContent.innerHTML = `
-      <h2>GAME OVER</h2>
-      <p style="color:#aaddff">FINAL SCORE: ${score}</p>
-      <p style="color:#aaddff">LEVEL REACHED: ${level}</p>
-      ${score >= highScore && score > 0 ? '<p style="color:#ffcc00">NEW HIGH SCORE!</p>' : ''}
-      <p style="color:#886644">HIGH SCORE: ${highScore}</p>
-      <p style="color:#ffcc00;margin-top:1rem">INSERT COIN</p>
-      <p style="color:#fff;animation:blink 1.2s step-end infinite">TAP TO CONTINUE</p>
-    `;
-  }
-
-  /* ── Dead screen ───────────────────────────────────── */
-  function drawDead() {
-    ctx.textAlign = "center";
-
-    /* GAME OVER — ghost-line bloom + crisp phosphor */
-    const titleSize = Math.floor(W * 0.12);
-    ctx.font = `bold ${titleSize}px "Courier New", monospace`;
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 4;
-    ctx.shadowColor = "#ff4444";
-    ctx.shadowBlur = 18;
-    ctx.globalAlpha = 0.15;
-    ctx.strokeText("GAME OVER", W / 2, H * 0.30);
-    ctx.globalAlpha = 1;
-    glow("#ff4444", 30);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText("GAME OVER", W / 2, H * 0.30);
-
-    noGlow();
-    ctx.font = `${Math.floor(W * 0.04)}px "Courier New", monospace`;
-    ctx.fillStyle = "#aaddff";
-    ctx.fillText(`FINAL SCORE: ${score}`, W / 2, H * 0.42);
-    ctx.fillText(`LEVEL REACHED: ${level}`, W / 2, H * 0.49);
-
-    if (score >= highScore && score > 0) {
-      ctx.fillStyle = "#ffcc00";
-      glow("#ffaa00", 8);
-      ctx.font = `bold ${Math.floor(W * 0.025)}px "Courier New", monospace`;
-      ctx.fillText("NEW HIGH SCORE!", W / 2, H * 0.56);
-      noGlow();
-    }
-
-    ctx.font = `bold ${Math.floor(W * 0.022)}px "Courier New", monospace`;
-    ctx.fillStyle = "#88644";
-    ctx.fillText(`HIGH SCORE: ${highScore}`, W / 2, H * 0.63);
-
-    deadFrame = (deadFrame || 0) + 1;
-    const promptBlink = Math.sin(deadFrame * 0.08) * 0.5 + 0.5;
-    if (attractPrompt) attractPrompt.style.opacity = promptBlink;
-
-    ctx.font = `bold ${Math.floor(W * 0.028)}px "Courier New", monospace`;
-    ctx.textAlign = "center";
-
-    ctx.fillStyle = "#ffcc00";
-    glow("#ffaa00", 12);
-    ctx.fillText("INSERT COIN", W / 2, H * 0.72);
-
-    ctx.globalAlpha = 0.4 + promptBlink * 0.6;
-    ctx.fillStyle = "#ffffff";
-    glow("#aaccff", 12);
-    ctx.fillText("PRESS START OR TAP", W / 2, H * 0.78);
-    ctx.globalAlpha = 1;
-    noGlow();
-    ctx.textAlign = "left";
-
-    if (keys.Space || keys.Enter || touchFireOn || canvasTapped) {
-      canvasTapped = false;
-      resetAttract();
-      state = "attract";
-      setHUDVisible(false);
-      setDeadOverlayVisible(false);
-      attractScreen.classList.remove("hidden");
-    }
-  }
-  // ── Pass 9: iPhone portrait playability & reliability
-
-  /* ── Public API ─────────────────────────────────────── */
-
-  function init() {
-    resize();
-    initInput();
-    resetAttract();
-    setHUDVisible(false);
+  function toAttract() {
     setDeadOverlayVisible(false);
-  }
-
-  function setHUDVisible(visible) {
-    if (visible) {
-      hud.classList.add("visible");
-      touchControls.classList.add("visible");
-    } else {
-      hud.classList.remove("visible");
-      touchControls.classList.remove("visible");
-    }
-  }
-
-  function setDeadOverlayVisible(visible) {
-    if (!deadOverlay) return;
-    if (visible) {
-      deadOverlay.classList.remove("hidden");
-    } else {
-      deadOverlay.classList.add("hidden");
-    }
-  }
-
-  /* ── Attract screen HTML overlay (mobile readable text) ─────── */
-  function setAttractScreenVisible(visible) {
-    if (visible) {
-      attractScreen.classList.remove("hidden");
-    } else {
-      attractScreen.classList.add("hidden");
-    }
+    score = 0; lives = 3; level = 1; levelFrames = 0; ramp = 0;
+    resetRings(); resetCastle(); mines.length = 0;
+    bullets.length = 0; fuzzballs.length = 0; particles.length = 0; debris.length = 0;
+    attractCard = 0; attractCardTimer = 0;
+    setHUDVisible(false);
+    state = "attract";
   }
 
   function startGame() {
-    state = "playing";
-    score = 0;
-    lives = 3;
-    level = 1;
-    resetAttract();
-    resetPlayer();
-    bullets.length = 0;
-    enemies.length = 0;
-    spawnWave();
-    spawnTimer = spawnInterval(level);
-    resetCore();
-    idleTimer = 0;
-    attractScreen.classList.add("hidden");
+    score = 0; lives = 3; level = 1; levelFrames = 0; ramp = 0;
+    particles.length = 0;
+    resetPlayer(false);
+    player.x = W / 2; player.y = H * 0.82;
+    player.angle = -Math.PI / 2;
+    resetCastle(); resetRings(); resetMines();
+    bullets.length = 0; fuzzballs.length = 0;
+    setAttractScreen(false);
     setDeadOverlayVisible(false);
     setHUDVisible(true);
+    introTimer = 100;
+    state = "playing";
+    idleTimer = 0;
+    sfxLevelIntro();
   }
 
   function toggleMute() {
     muted = !muted;
-    if (muteBtn) {
-      muteBtn.textContent = muted ? "UNMUTE" : "MUTE";
-    }
+    if (muteBtn) muteBtn.textContent = muted ? "SOUND ON" : "MUTE";
   }
 
-  /* ── drawGame: cabinet-era vector arcade rendering ──── */
-  function drawGame() {
-    /* Runtime-safe geometry checks (once, on first frame) */
-    if (!drawGame._checked) {
-      drawGame._checked = true;
-      /* Verify shield ring radii are ordered innermost to outermost */
-      for (let i = 1; i < SHIELD_RINGS.length; i++) {
-        if (SHIELD_RINGS[i - 1].radius >= SHIELD_RINGS[i].radius) {
-          console.warn(`Star Castle 2: shield ring ${i-1} radius (${SHIELD_RINGS[i-1].radius}) >= ring ${i} radius (${SHIELD_RINGS[i].radius}) — expected ascending order`);
-        }
-      }
-      /* Verify shield ring segments are reasonable */
-      for (let i = 0; i < SHIELD_RINGS.length; i++) {
-        if (SHIELD_RINGS[i].segments < 6 || SHIELD_RINGS[i].segments > 24) {
-          console.warn(`Star Castle 2: shield ring ${i} segments (${SHIELD_RINGS[i].segments}) outside [6,24] range`);
-        }
-      }
-      /* Verify canvas dimensions are valid */
-      if (W <= 0 || H <= 0 || W > 10000 || H > 10000) {
-        console.warn(`Star Castle 2: canvas dimensions ${W}x${H} outside expected range`);
-      }
-    }
+  /* ── Main update ───────────────────────────────────────────────────── */
+  function update() {
+    attractFrame++;
 
-    /* Background — true black for faithful vector cabinet feel (Fix 14) */
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, W, H);
-
-    /* Stars — barely visible, no competition with vector lines.
-       Pure white at sub-5% alpha; authentic vector cabinets had no starfield,
-       so this is kept to a whisper behind the phosphor artwork. */
-    for (const s of stars) {
-      const twinkle = 0.3 + Math.sin(Date.now() * 0.002 + s.b * 10) * 0.3;
-      ctx.fillStyle = "rgba(255, 255, 255, 1)";
-      ctx.globalAlpha = twinkle * 0.04;
-      ctx.fillRect(s.x, s.y, s.s, s.s);
-    }
-    ctx.globalAlpha = 1;
-
-    if (state === "attract") {
-      drawAttract();
-      return;
-    }
-
-    /* Level transition: show level number + HUD (score preserved, visible) */
-    if (state === "levelTransition") {
-      ctx.textAlign = "center";
-      /* Ghost-line bloom */
-      const lvlSize = Math.floor(W * 0.12);
-      ctx.font = `bold ${lvlSize}px "Courier New", monospace`;
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 4;
-      ctx.shadowColor = "#33ff33";
-      ctx.shadowBlur = 18;
-      ctx.globalAlpha = 0.15;
-      ctx.strokeText(`LEVEL ${level}`, W / 2, H / 2 - 10);
-      ctx.globalAlpha = 1;
-      /* Primary phosphor */
-      ctx.fillStyle = "#ffffff";
-      ctx.shadowColor = "#33ff33";
-      ctx.shadowBlur = 12;
-      ctx.fillText(`LEVEL ${level}`, W / 2, H / 2 - 10);
-      ctx.shadowBlur = 0;
-      drawHUD();
-      return;
-    }
-
-    if (state === "coreDestruction") {
-      /* Flash overlay on entry */
-      if (coreDestructionTimer > 75) {
-        const flashAlpha = (coreDestructionTimer - 75) / 15 * 0.2;
-        ctx.fillStyle = `rgba(255, 255, 250, ${flashAlpha})`;
-        ctx.fillRect(0, 0, W, H);
-      }
-
-      /* Explosion debris particles — warm phosphor sparks */
-      for (const p of particles) {
-        const alpha = p.life / p.maxLife;
-        ctx.strokeStyle = p.color;
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = p.color;
-        ctx.shadowBlur = 4;
-        ctx.globalAlpha = alpha;
-        const len = p.size * alpha;
-        ctx.beginPath();
-        ctx.moveTo(p.x - len, p.y);
-        ctx.lineTo(p.x + len, p.y);
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-      noGlow();
-
-      /* DESTROYED feedback text — ghost-line bloom + crisp phosphor */
-      ctx.textAlign = "center";
-      const destSize = Math.floor(W * 0.10);
-      ctx.font = `bold ${destSize}px "Courier New", monospace`;
-      /* Ghost-line bloom */
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 4;
-      ctx.shadowColor = "#ff4400";
-      ctx.shadowBlur = 18;
-      ctx.globalAlpha = 0.15;
-      ctx.strokeText("DESTROYED", W / 2, H / 2);
-      ctx.globalAlpha = 1;
-      /* Primary phosphor */
-      ctx.fillStyle = "#ffffff";
-      glow("#ff4400", 20);
-      ctx.fillText("DESTROYED", W / 2, H / 2);
-      noGlow();
-
-      drawHUD();
-      return;
-    }
+    if (state === "attract") { advanceAttractCard(); return; }
 
     if (state === "dead") {
-      /* Deterministic freeze: during DEAD_PAUSE_FRAMES frames, reject all input.
-         Only after the pause elapses does "INSERT COIN / TAP" accept a restart.
-         This matches the cabinet's fixed-duration dead-screen freeze. */
-      if (deadPauseTimer > 0) {
-        deadPauseTimer--;
-      } else if (keys.Space || keys.Enter || touchFireOn || canvasTapped) {
-        /* INPUT ACCEPTED — transition to attract mode */
-        canvasTapped = false;
-        resetAttract();
-        state = "attract";
-        setHUDVisible(false);
-        setDeadOverlayVisible(false);
-      }
-      drawDead();
+      if (deadPauseTimer > 0) deadPauseTimer--;
       return;
     }
 
     if (state === "dying") {
-      drawDying();
+      dyingTimer--;
+      updateParticles(particles);
+      if (dyingTimer <= 0) {
+        if (lives > 0) { resetPlayer(true); state = "playing"; }
+        else endGame();
+      }
       return;
     }
 
-    if (state === "paused") {
-      /* Draw game frozen, overlay PAUSED text */
-      drawHUD();
-      ctx.textAlign = "center";
-      const pauseSize = Math.floor(W * 0.12);
-      ctx.font = `bold ${pauseSize}px "Courier New", monospace`;
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 4;
-      ctx.shadowColor = "#ffcc00";
-      ctx.shadowBlur = 18;
-      ctx.globalAlpha = 0.15;
-      ctx.strokeText("PAUSED", W / 2, H / 2);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = "#ffffff";
-      glow("#ffaa00", 20);
-      ctx.fillText("PAUSED", W / 2, H / 2);
-      noGlow();
-      ctx.textAlign = "left";
+    if (state === "castleDead") {
+      collapseTimer--;
+      collapseFactor = Math.max(0, collapseTimer / COLLAPSE_FRAMES);
+      updateParticles(particles);
+      /* Ring sections flicker off as they collapse inward */
+      if (collapseTimer % 6 === 0) {
+        const ri = Math.floor(Math.random() * 3);
+        const si = Math.floor(Math.random() * RING_SEGMENTS);
+        if (rings[ri].sections[si] > 0) { rings[ri].sections[si] = 0; spawnSparks(ri, si, 2); }
+      }
+      if (collapseTimer <= 0) startLevel(level + 1);
       return;
     }
 
-    /* Shield rings — green phosphor, crisp wireframe, distinct segment gaps.
-       Outer ring glows brightest (intensity 0.95, glow 14), inner ring is dimmest
-       (intensity 0.30, glow 6) so the player reads "outer = primary defense" at a glance.
-       Gap ticks mark each arc endpoint so breaches are visible even during rapid rotation. */
-     if (player.alive) {
-       const inRegenAnim = player.regenAnimFrames > 0;
-      const regenT = inRegenAnim ? 1 - player.regenAnimFrames / REGEN_ANIM_FRAMES : 1;
-      for (let ri = 0; ri < SHIELD_RINGS.length; ri++) {
-        const ring = SHIELD_RINGS[ri];
-        const rs = player.rings[ri];
-        if (rs.destroyed) continue;
-        const segments = ring.segments;
-        const activeSegs = Math.floor((rs.health / 100) * segments);
-        const segAngle = (Math.PI * 2) / segments;
-        const segArc = segAngle * 0.55;
+    if (state !== "playing") return;
 
-        /* Visual radius: during regen animation, interpolate from start to target */
-        let visualRadius = ring.radius;
-        if (inRegenAnim && player.regenCollRadii) {
-          const startR = ri === 0 ? 0 : player.regenCollRadii[ri - 1];
-          visualRadius = startR + (ring.radius - startR) * regenT;
+    /* Idle → cabinet attract behavior */
+    idleTimer++;
+    if (idleTimer >= IDLE_TIMEOUT) { toAttract(); return; }
+
+    /* Continuous intra-level difficulty ramp (the original "catch") */
+    levelFrames++;
+    ramp = Math.min(0.5, levelFrames * 0.00012);
+
+    if (introTimer > 0) introTimer--;
+
+    /* Rings rotate (opposite directions) */
+    const rs = ringRotSpeed(level) * (1 + ramp * 0.3);
+    for (let i = 0; i < 3; i++) {
+      rings[i].rot += RING_DIRS[i] * rs;
+      if (rings[i].rot > Math.PI * 2) rings[i].rot -= Math.PI * 2;
+      if (rings[i].rot < 0) rings[i].rot += Math.PI * 2;
+      if (rings[i].bloom > 0) rings[i].bloom--;
+    }
+
+    /* Player physics */
+    if (player.alive) {
+      const TURN = 0.09;
+      const d = rotDir();
+      if (d !== 0) player.angle += d * TURN;
+      const thrust = 0.16;
+      player.thrusting = thrustDir() !== 0;
+      if (player.thrusting) {
+        player.vx += Math.cos(player.angle) * thrust;
+        player.vy += Math.sin(player.angle) * thrust;
+        sfxThrust();
+      }
+      /* Terminal drift decay — cabinet-era feel */
+      player.vx *= 0.996; player.vy *= 0.996;
+      const sp = Math.hypot(player.vx, player.vy);
+      const cap = 5.0;
+      if (sp > cap) { player.vx = (player.vx / sp) * cap; player.vy = (player.vy / sp) * cap; }
+      player.x += player.vx; player.y += player.vy;
+      wrap(player);
+      if (player.fireCooldown > 0) player.fireCooldown--;
+      if (player.invincible > 0) player.invincible--;
+      if (fireHeld()) fireBullet();
+
+      /* Player vs shield rings (live sections kill), vs castle */
+      const pr = dist(player.x, player.y, castle.x, castle.y);
+      if (pr < coreRadius() + S * 0.008) hitPlayer();
+      else {
+        for (let i = 0; i < 3; i++) {
+          if (crossedLiveSection(i, angTo(castle.x, castle.y, player.x, player.y), pr, pr) >= 0) { hitPlayer(); break; }
         }
+      }
+    }
 
-        /* Breach flash: segment-specific red flash for breach readability */
-        if (rs.breachFlash > 0) {
-          const flashAlpha = rs.breachFlash / 30;
-          for (let i = 0; i < activeSegs; i++) {
-            const a = shieldAngle + (i / segments) * Math.PI * 2;
-            const startA = a;
-            const endA = a + segArc;
-            ctx.beginPath();
-            ctx.arc(player.x, player.y, visualRadius, startA, endA);
-            ctx.strokeStyle = `rgba(255, ${Math.floor(60 * flashAlpha)}, ${Math.floor(60 * flashAlpha)}, ${flashAlpha})`;
-            ctx.lineWidth = 3;
-            ctx.shadowColor = "#ff0000";
-            ctx.shadowBlur = 10;
-            ctx.stroke();
-          }
+    /* Castle AI */
+    updateCastle();
+
+    /* Mines */
+    updateMines();
+
+    /* Player bullets */
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      b.px = b.x; b.py = b.y;
+      b.x += b.vx; b.y += b.vy;
+      b.life--;
+      if (b.life <= 0) { bullets.splice(i, 1); continue; }
+      const bMoved = dist(b.px, b.py, b.x, b.y) > 0.01;
+      if (!bMoved) { continue; }
+      wrapB(b);
+      const c0 = dist(b.px, b.py, castle.x, castle.y);
+      const c1 = dist(b.x, b.y, castle.x, castle.y);
+      /* Skip collisions across a wrap discontinuity */
+      if (dist(b.px, b.py, b.x, b.y) > Math.max(W, H) * 0.5) continue;
+      const aim = angTo(castle.x, castle.y, b.x, b.y);
+      /* Castle hit */
+      if (castle.alive && (c1 < coreRadius() || (c0 > coreRadius() && c1 < coreRadius()))) {
+        bullets.splice(i, 1);
+        killCastle();
+        break;
+      }
+      /* Ring section hits (outermost inward) */
+      let consumed = false;
+      for (let ri = 2; ri >= 0; ri--) {
+        const R = ringRadius(ri);
+        const crossed = (c0 - R) * (c1 - R) <= 0 || Math.abs(c1 - R) < S * COLLIDE_BAND;
+        if (!crossed) continue;
+        const hit = crossedLiveSection(ri, angTo(castle.x, castle.y, (b.px + b.x) / 2, (b.py + b.y) / 2), c0, c1);
+        if (hit >= 0) {
+          const segIdx = sectionAt(ri, angTo(castle.x, castle.y, (b.px + b.x) / 2, (b.py + b.y) / 2));
+          hitSection(ri, segIdx);
+          bullets.splice(i, 1);
+          consumed = true;
+          break;
         }
-
-        /* Ghost-line bloom pass: dimmer, wider glow for phosphor bloom.
-           Uses per-ring intensity + glow so outer rings cast a bigger, brighter aura */
-        ctx.strokeStyle = ring.color;
-        ctx.lineWidth = 4 * ring.intensity;
-        ctx.shadowColor = ring.color;
-        ctx.shadowBlur = ring.glow;
-        ctx.globalAlpha = 0.12 * ring.intensity;
-        for (let i = 0; i < segments; i++) {
-          const a = shieldAngle + (i / segments) * Math.PI * 2;
-          if (i < activeSegs) {
-            const startA = a;
-            const endA = a + (Math.PI * 2 / segments) * 0.55;
-            ctx.beginPath();
-            ctx.arc(player.x, player.y, visualRadius, startA, endA);
-            ctx.stroke();
-          }
+      }
+      if (consumed) continue;
+      /* Bullet vs mine — destroyed, NO points (original rule) */
+      for (let j = mines.length - 1; j >= 0; j--) {
+        if (dist(b.x, b.y, mines[j].x, mines[j].y) < Math.max(7, mines[j].size * S + 3)) {
+          burstParticles(mines[j].x, mines[j].y, CORE_COLOR, 8);
+          mines.splice(j, 1);
+          bullets.splice(i, 1);
+          sfxMineDie();
+          break;
         }
+      }
+    }
 
-        /* White-hot core pass: bright center line for vector monitor authenticity */
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 0.8;
-        ctx.shadowColor = "#aaffaa";
-        ctx.shadowBlur = 2;
-        ctx.globalAlpha = 0.85 * ring.intensity;
-        for (let i = 0; i < segments; i++) {
-          const a = shieldAngle + (i / segments) * Math.PI * 2;
-          if (i < activeSegs) {
-            const startA = a;
-            const endA = a + (Math.PI * 2 / segments) * 0.55;
-            ctx.beginPath();
-            ctx.arc(player.x, player.y, visualRadius, startA, endA);
-            ctx.stroke();
-          }
-        }
+    /* Fuzzballs: pass through shields (energy rounds), kill player */
+    for (let i = fuzzballs.length - 1; i >= 0; i--) {
+      const f = fuzzballs[i];
+      f.x += f.vx; f.y += f.vy;
+      f.life--;
+      if (f.life <= 0) { fuzzballs.splice(i, 1); continue; }
+      wrap(f);
+      if (player.alive && player.invincible <= 0 && dist(f.x, f.y, player.x, player.y) < f.size * S + 7) {
+        fuzzballs.splice(i, 1);
+        hitPlayer();
+      }
+    }
 
-        /* Primary phosphor pass: crisp green wireframe (preserves lineWidth 1.5, shadowBlur 6) */
-        ctx.strokeStyle = ring.color;
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = ring.color;
-        ctx.shadowBlur = 6;
-        ctx.globalAlpha = 1;
+    /* Loose mines kill on contact */
+    if (player.alive && player.invincible <= 0) {
+      for (let j = 0; j < mines.length; j++) {
+        if (dist(mines[j].x, mines[j].y, player.x, player.y) < mines[j].size * S + 8) { hitPlayer(); break; }
+      }
+    }
 
-        for (let i = 0; i < segments; i++) {
-          const a = shieldAngle + (i / segments) * Math.PI * 2;
-          if (i < activeSegs) {
-            const startA = a;
-            const endA = a + (Math.PI * 2 / segments) * 0.55;
-            ctx.beginPath();
-            ctx.arc(player.x, player.y, visualRadius, startA, endA);
-            ctx.stroke();
-          }
-        }
+    updateParticles(particles);
+  }
 
-        /* Gap tick: short perpendicular line at each active-segment endpoint.
-           Mirrors the 1980 Star Castle cabinet where gap direction was a crisp visual cue. */
-        /* Draw gap ticks for each active segment boundary */
-        ctx.strokeStyle = ring.color;
-        ctx.lineWidth = 1.2;
-        ctx.shadowColor = ring.color;
-        ctx.shadowBlur = 4;
-        ctx.globalAlpha = 0.7 * ring.intensity;
-        for (let i = 0; i < activeSegs; i++) {
-          const a = shieldAngle + (i / segments) * Math.PI * 2;
-          /* Tick at the END of each segment (the gap boundary) */
-          const endAngle = a + segArc;
-          const tx = player.x + Math.cos(endAngle) * visualRadius;
-          const ty = player.y + Math.sin(endAngle) * visualRadius;
-          /* Radial tick: short line along the radius at each gap boundary */
-          const radNX = Math.cos(endAngle) * GAP_TICK_LEN;
-          const radNY = Math.sin(endAngle) * GAP_TICK_LEN;
+  /* Wrap helper for bullets using the same margin as wrap() */
+  function wrapB(b) { const m = 14; if (b.x < -m) b.x = W + m; else if (b.x > W + m) b.x = -m; if (b.y < -m) b.y = H + m; else if (b.y > H + m) b.y = -m; }
+
+  /* ── Vector rendering helpers ──────────────────────────────────────── */
+  function glow(color, radius) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur = radius;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.6;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+  }
+  function glowThick(color, w, radius) {
+    glow(color, radius);
+    ctx.lineWidth = w;
+  }
+  function noGlow() { ctx.shadowBlur = 0; ctx.shadowColor = "transparent"; }
+
+  function drawStars() {
+    noGlow();
+    for (let i = 0; i < stars.length; i++) {
+      const s = stars[i];
+      const tw = 0.7 + 0.3 * Math.sin(attractFrame * 0.02 + s.tw);
+      ctx.fillStyle = "rgba(180,220,255," + (s.b * tw).toFixed(3) + ")";
+      ctx.fillRect(s.x, s.y, 1.4, 1.4);
+    }
+  }
+
+  function arcSeg(cx, cy, r, a0, a1) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, a0, a1);
+    ctx.stroke();
+  }
+
+  function dashedArc(cx, cy, r, a0, a1, dash) {
+    ctx.save();
+    ctx.setLineDash([dash, dash]);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, a0, a1);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* One ring: intact = solid bright, damaged = dashed dim, destroyed = gap
+     with end-tick marks (cabinet-style directional cue). */
+  function drawRing(ri) {
+    const ring = rings[ri];
+    const R = ringRadius(ri);
+    if (R < 4) return;
+    const seg = (Math.PI * 2) / RING_SEGMENTS;
+    const arcCover = seg * 0.8;
+    const color = RING_COLORS[ri];
+    const thickness = Math.max(2.2, S * 0.006);
+    for (let si = 0; si < RING_SEGMENTS; si++) {
+      const hp = ring.sections[si];
+      if (hp <= 0) {
+        /* gap ticks at the broken section edges */
+        const a0 = ring.rot + si * seg;
+        const a1 = a0 + arcCover;
+        glow(color, 4);
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.35;
+        for (const a of [a0, a1]) {
           ctx.beginPath();
-          ctx.moveTo(tx - radNX, ty - radNY);
-          ctx.lineTo(tx + radNX, ty + radNY);
+          ctx.moveTo(castle.x + Math.cos(a) * (R - S * 0.008), castle.y + Math.sin(a) * (R - S * 0.008));
+          ctx.lineTo(castle.x + Math.cos(a) * (R + S * 0.008), castle.y + Math.sin(a) * (R + S * 0.008));
           ctx.stroke();
         }
+        ctx.globalAlpha = 1;
+        continue;
       }
-      noGlow();
+      const a0 = ring.rot + si * seg;
+      const a1 = a0 + arcCover;
+      if (hp === SECTION_HITS) {
+        glowThick(color, thickness, 14);
+        ctx.globalAlpha = 0.22;
+        arcSeg(castle.x, castle.y, R, a0, a1);
+        ctx.globalAlpha = 1;
+        glowThick("#ffffff", Math.max(1, thickness * 0.45), 8);
+        arcSeg(castle.x, castle.y, R, a0, a1);
+      } else {
+        /* damaged: dashed, dimmer */
+        glowThick(color, Math.max(1.4, thickness * 0.6), 8);
+        ctx.globalAlpha = 0.55;
+        dashedArc(castle.x, castle.y, R, a0, a1, S * 0.008);
+        ctx.globalAlpha = 1;
+      }
     }
+    noGlow();
+  }
 
-    /* Core cannon — castle silhouette, wireframe only, distinct barrel
-       The cannon barrel smoothly tracks the player via core.angle (set in updateCore).
-       Barrel rotation uses core.angle (actual cannon position) not direct aimAngle,
-       matching the original Star Castle where the turret visibly sweeps toward the ship.
-       A tracking line from barrel tip to player shows shot intent when aligned. */
-     if (core.alive) {
-       const aimAngle = angle(core, player);
-       /* Gap check uses core's actual pointing direction (what the barrel shows) */
-      const barrelGapAligned = findShieldGap(core.angle, shieldAngle);
-      /* Also check if a direct shot at player would go through gaps */
-      const aimGapAligned = findShieldGap(aimAngle, shieldAngle);
-
-      ctx.save();
-      ctx.translate(core.x, core.y);
-
-      /* Castle body: rectangular base with corner turrets */
-      /* Ghost-line bloom pass for phosphor glow — stronger for cabinet presence */
-      ctx.strokeStyle = "#33ff33";
-      ctx.lineWidth = 5;
-      ctx.shadowColor = "#33ff33";
-      ctx.shadowBlur = 18;
-      ctx.globalAlpha = 0.18;
-      ctx.strokeRect(-16, -12, 32, 24);
+  /* Castle: low vector fort silhouette + tracking barrel */
+  function drawCastle() {
+    if (!castle.alive && collapseTimer <= 0) return;
+    const r = coreRadius();
+    glow(CORE_COLOR, 12);
+    ctx.lineWidth = 1.8;
+    /* Base fort: wide flat hull with dome */
+    ctx.beginPath();
+    ctx.moveTo(castle.x - r, castle.y + r * 0.55);
+    ctx.lineTo(castle.x - r * 0.55, castle.y - r * 0.1);
+    ctx.lineTo(castle.x + r * 0.55, castle.y - r * 0.1);
+    ctx.lineTo(castle.x + r, castle.y + r * 0.55);
+    ctx.stroke();
+    /* Dome */
+    ctx.beginPath();
+    ctx.arc(castle.x, castle.y - r * 0.1, r * 0.42, Math.PI, 0);
+    ctx.stroke();
+    /* Tracking barrel */
+    const bx = castle.x + Math.cos(castle.angle) * r * 0.3;
+    const by = castle.y + Math.sin(castle.angle) * r * 0.3;
+    const mx = castle.x + Math.cos(castle.angle) * r * 1.35;
+    const my = castle.y + Math.sin(castle.angle) * r * 1.35;
+    const perp = castle.angle + Math.PI / 2;
+    const bw = r * 0.16;
+    ctx.beginPath();
+    ctx.moveTo(bx + Math.cos(perp) * bw, by + Math.sin(perp) * bw);
+    ctx.lineTo(mx + Math.cos(perp) * bw, my + Math.sin(perp) * bw);
+    ctx.lineTo(mx - Math.cos(perp) * bw, my - Math.sin(perp) * bw);
+    ctx.lineTo(bx - Math.cos(perp) * bw, by - Math.sin(perp) * bw);
+    ctx.stroke();
+    /* Lock indicator: small chevron when locked */
+    if (castle.locked && castle.alive) {
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.arc(mx, my, r * 0.22, castle.angle - 0.7, castle.angle + 0.7);
+      ctx.stroke();
       ctx.globalAlpha = 1;
+    }
+    noGlow();
+  }
 
-      /* Primary wireframe: thicker for cabinet presence */
-      ctx.strokeStyle = "#33ff33";
-      ctx.lineWidth = 2;
-      ctx.shadowColor = "#22ff22";
-      ctx.shadowBlur = 8;
-      ctx.strokeRect(-16, -12, 32, 24);
-
-      /* Corner turrets */
-      const ts = 4;
-      ctx.strokeStyle = "#33ff33";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(-16 - ts/2, -12 - ts/2, ts, ts);
-      ctx.strokeRect(16 - ts/2, -12 - ts/2, ts, ts);
-      ctx.strokeRect(-16 - ts/2, 12 - ts/2, ts, ts);
-      ctx.strokeRect(16 - ts/2, 12 - ts/2, ts, ts);
-
-      /* Battlements: crenellations along top edge for castle silhouette */
-      ctx.strokeStyle = "#33ff33";
-      ctx.lineWidth = 1;
-      ctx.shadowColor = "#33ff33";
-      ctx.shadowBlur = 3;
-      const battW = 4;
-      for (let bx = -16; bx < 16; bx += battW * 2) {
-        ctx.beginPath();
-        ctx.moveTo(bx, -12);
-        ctx.lineTo(bx, -16);
-        ctx.lineTo(bx + battW, -16);
-        ctx.lineTo(bx + battW, -12);
-        ctx.stroke();
-      }
-
-      /* Lock-on visual feedback (Fix 19): barrel pulses when locked on target */
-      if (core.locked && core.muzzleFlash === 0) {
-        const lockPulse = Math.sin(Date.now() * 0.01) * 0.3 + 0.7;
-        ctx.strokeStyle = `rgba(255, ${Math.floor(100 * lockPulse)}, 0, ${lockPulse})`;
-        ctx.lineWidth = 2;
-        ctx.shadowColor = "#ff6600";
-        ctx.shadowBlur = 12;
-        const barrelLen = 30 + lockPulse * 5;
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(Math.cos(core.angle) * barrelLen, Math.sin(core.angle) * barrelLen);
-        ctx.stroke();
-      }
-
-      /* Central tower — Star Castle signature silhouette */
-      ctx.strokeStyle = "#33ff33";
-      ctx.lineWidth = 1.5;
-      ctx.shadowColor = "#33ff33";
-      ctx.shadowBlur = 5;
-      ctx.strokeRect(-4, -12, 8, 24);
-
-      /* Tower spire — pointed top for castle profile */
-      ctx.strokeStyle = "#44ff44";
-      ctx.lineWidth = 1.5;
-      ctx.shadowColor = "#44ff44";
-      ctx.shadowBlur = 6;
+  /* Player: classic vector wedge + thrust flame */
+  function drawPlayer() {
+    if (!player.alive) return;
+    if (player.invincible > 0 && Math.floor(attractFrame / 4) % 2 === 0) return; /* blink */
+    const a = player.angle;
+    const sz = Math.max(9, S * 0.022);
+    glow(CORE_COLOR, 10);
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(castle.x === 0 ? 0 : player.x + Math.cos(a) * sz, player.y + Math.sin(a) * sz);
+    ctx.lineTo(player.x + Math.cos(a + 2.5) * sz * 0.8, player.y + Math.sin(a + 2.5) * sz * 0.8);
+    ctx.moveTo(player.x + Math.cos(a) * sz, player.y + Math.sin(a) * sz);
+    ctx.lineTo(player.x + Math.cos(a - 2.5) * sz * 0.8, player.y + Math.sin(a - 2.5) * sz * 0.8);
+    ctx.moveTo(player.x + Math.cos(a + 2.5) * sz * 0.8, player.y + Math.sin(a + 2.5) * sz * 0.8);
+    ctx.lineTo(player.x + Math.cos(a) * sz * 0.25, player.y + Math.sin(a) * sz * 0.25);
+    ctx.lineTo(player.x + Math.cos(a - 2.5) * sz * 0.8, player.y + Math.sin(a - 2.5) * sz * 0.8);
+    ctx.stroke();
+    if (player.thrusting) {
+      glow("#ff8c1a", 8);
+      const fa = a + Math.PI;
+      const fl = sz * (0.7 + Math.random() * 0.4);
       ctx.beginPath();
-      ctx.moveTo(-4, -12);
-      ctx.lineTo(0, -20);
-      ctx.lineTo(4, -12);
+      ctx.moveTo(player.x + Math.cos(fa - 0.3) * sz * 0.5, player.y + Math.sin(fa - 0.3) * sz * 0.5);
+      ctx.lineTo(player.x + Math.cos(fa) * fl, player.y + Math.sin(fa) * fl);
+      ctx.lineTo(player.x + Math.cos(fa + 0.3) * sz * 0.5, player.y + Math.sin(fa + 0.3) * sz * 0.5);
       ctx.stroke();
+    }
+    noGlow();
+  }
 
-      /* Gate: arched entrance at bottom for castle authenticity */
-      ctx.strokeStyle = "#22dd22";
-      ctx.lineWidth = 1;
-      ctx.shadowBlur = 2;
-      ctx.beginPath();
-      ctx.moveTo(-5, 12);
-      ctx.arcTo(-5, 4, 5, 4, 5);
-      ctx.arcTo(5, 12, -5, 12, 5);
-      ctx.stroke();
-
-      /* Inner chamber */
-      ctx.strokeStyle = "#22dd22";
-      ctx.lineWidth = 1;
-      ctx.shadowBlur = 3;
-      ctx.strokeRect(-8, -6, 16, 12);
-
-      /* Inner structural lines — vertical/horizontal divisions */
-      ctx.strokeStyle = "#11bb11";
-      ctx.lineWidth = 1;
-      ctx.shadowColor = "#11bb11";
-      ctx.shadowBlur = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, -12);
-      ctx.lineTo(0, 12);
-      ctx.moveTo(-16, 0);
-      ctx.lineTo(16, 0);
-      ctx.stroke();
-
-      /* Center crosshair: color and size indicate barrel alignment with gaps.
-         When locked (barrel within 2x fireAngleTol of player), crosshair is bright
-         and outlines the imminent firing zone for readable cue. */
-      const crossReady = core.locked && barrelGapAligned;
-      ctx.strokeStyle = crossReady ? "#ffff00" : (barrelGapAligned ? "#ffff33" : "#33ff33");
-      ctx.shadowColor = crossReady ? "#ffff00" : (barrelGapAligned ? "#ffff00" : "#22ff22");
-      ctx.shadowBlur = crossReady ? 6 : 3;
-      ctx.lineWidth = crossReady ? 2 : 1.5;
-      const chR = crossReady ? 6 : 4;
-      ctx.beginPath();
-      ctx.moveTo(0, -chR); ctx.lineTo(0, chR);
-      ctx.moveTo(-chR, 0); ctx.lineTo(chR, 0);
-      if (crossReady) {
-        /* Outer ring when locked-on: signals imminent firing window */
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(0, 0, chR + 1.5, 0, Math.PI * 2);
-      }
-      ctx.stroke();
-
-      /* Cannon barrel: rectangular outline, rotated to core.angle (smooth tracking)
-         Original Star Castle: barrel visibly sweeps to track the player,
-         does not snap instantly. Using core.angle preserves this behavior. */
+  /* Mines: small spinning diamond — same blue as playfield overlay */
+  function drawMines() {
+    glow(CORE_COLOR, 8);
+    ctx.lineWidth = 1.4;
+    for (let i = 0; i < mines.length; i++) {
+      const m = mines[i];
+      const sz = Math.max(4, m.size * S);
       ctx.save();
-      ctx.rotate(core.angle);
-      /* Barrel ghost-line for bloom */
-      const barrelAlpha = crossReady ? 0.3 : 0.15;
-      ctx.strokeStyle = crossReady ? "#ffffaa" : "#33ff33";
-      ctx.lineWidth = 3;
-      ctx.shadowColor = crossReady ? "#ffff00" : "#33ff33";
-      ctx.shadowBlur = crossReady ? 14 : 10;
-      ctx.globalAlpha = barrelAlpha;
-      ctx.strokeRect(8, -2, 16, 4);
-      ctx.globalAlpha = 1;
-      /* Primary barrel wireframe */
-      ctx.strokeStyle = crossReady ? "#ffff66" : "#33ff33";
-      ctx.lineWidth = 1.5;
-      ctx.shadowColor = crossReady ? "#ffff44" : "#22ff22";
-      ctx.shadowBlur = crossReady ? 5 : 3;
-      /* Barrel: rectangular body with directional arrow tip for clear direction read */
+      ctx.translate(m.x, m.y);
+      ctx.rotate(m.angle);
       ctx.beginPath();
-      ctx.moveTo(8, -2);
-      ctx.lineTo(24, 0);         // converges to muzzle tip
-      ctx.lineTo(8, 2);
+      ctx.moveTo(0, -sz); ctx.lineTo(sz, 0); ctx.lineTo(0, sz); ctx.lineTo(-sz, 0);
       ctx.closePath();
       ctx.stroke();
-      /* Barrel muzzle detail — small circle at tip */
-      ctx.strokeStyle = crossReady ? "#ffffff" : "#44ff44";
-      ctx.lineWidth = 1;
-      ctx.shadowColor = crossReady ? "#ffffff" : "#44ff44";
-      ctx.shadowBlur = crossReady ? 6 : 4;
       ctx.beginPath();
-      ctx.arc(24, 0, crossReady ? 2.5 : 2, 0, Math.PI * 2);
+      ctx.moveTo(-sz * 0.4, 0); ctx.lineTo(sz * 0.4, 0);
       ctx.stroke();
-      /* Muzzle flash: bright burst when cannon fires (6 frames)
-         Original Star Castle showed a brief flash at barrel exit. */
-      if (core.muzzleFlash > 0) {
-        const flashAlpha = core.muzzleFlash / 6;
-        const flashR = 4 + (1 - flashAlpha) * 6;
-        ctx.strokeStyle = `rgba(255, 255, 200, ${flashAlpha})`;
-        ctx.lineWidth = 2;
-        ctx.shadowColor = "#ffffaa";
-        ctx.shadowBlur = 12;
-        ctx.beginPath();
-        ctx.arc(26, 0, flashR, 0, Math.PI * 2);
-        ctx.stroke();
-        /* Flash rays */
-        ctx.strokeStyle = `rgba(255, 255, 100, ${flashAlpha * 0.7})`;
-        ctx.lineWidth = 1;
-        ctx.shadowBlur = 6;
-        for (let r = 0; r < 4; r++) {
-          const ra = (r / 4) * Math.PI * 2 + core.muzzleFlash * 0.3;
-          ctx.beginPath();
-          ctx.moveTo(26 + Math.cos(ra) * flashR, Math.sin(ra) * flashR);
-          ctx.lineTo(26 + Math.cos(ra) * (flashR + 4), Math.sin(ra) * (flashR + 4));
-          ctx.stroke();
-        }
-      }
-      ctx.restore();
-
-      /* Tracking line: faint dashed line from barrel tip toward player
-         Shows where the cannon is actually pointing vs. where player is.
-         Original Star Castle used a visible sight line. When locked-on,
-         the tracking line extends further and uses brighter phosphor to signal
-         an imminent firing window (barrel within fireAngleTol, all ring gaps aligned). */
-      const barrelTipX = Math.cos(core.angle) * 24;
-      const barrelTipY = Math.sin(core.angle) * 24;
-      /* Extend tracking line to player position when locked (full fire path visible).
-         When tracking, extend just a bit toward the player angle for guidance. */
-      const trackExt = crossReady ? 280 : (core.locked ? 160 : 80);
-      const playerRelX = player.x - core.x;
-      const playerRelY = player.y - core.y;
-      const distToPlayer = Math.hypot(playerRelX, playerRelY);
-      /* Clamp draw length to actual distance or max extension */
-      const drawScale = Math.max(1, distToPlayer / trackExt);
-      const extX = barrelTipX + playerRelX * (drawScale >= 1 ? 1 : distToPlayer / trackExt);
-      const extY = barrelTipY + playerRelY * (drawScale >= 1 ? 1 : distToPlayer / trackExt);
-      const trackAlpha = crossReady ? 0.5 : (core.locked ? 0.35 : 0.15);
-      /* Line color: bright yellow when locked+gaps, amber when just locked, green otherwise */
-      const trackColor = crossReady ? "#ffff44" : (core.locked ? "#ffcc33" : "#33ff33");
-      const trackGlow = crossReady ? 8 : (core.locked ? 5 : 2);
-      ctx.strokeStyle = trackColor;
-      ctx.lineWidth = crossReady ? 1.5 : 1;
-      ctx.shadowColor = crossReady ? "#ffff00" : (core.locked ? "#ff8800" : "#22ff22");
-      ctx.shadowBlur = trackGlow;
-      ctx.globalAlpha = trackAlpha;
-      ctx.setLineDash(crossReady ? [] : [4, 4]);
-      /* Dashed when tracking, solid when locked (ready to fire). */
-      ctx.beginPath();
-      ctx.moveTo(barrelTipX, barrelTipY);
-      ctx.lineTo(extX, extY);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.globalAlpha = 1;
-
-      noGlow();
       ctx.restore();
     }
+    noGlow();
+  }
 
-    /* Cannon shots — bright warm phosphor, high visibility threat indicator.
-       Direction arrow at head for clear trajectory read on vector display. */
-    for (const c of cannonShots) {
-      /* Ghost-line bloom for threat presence */
-      ctx.strokeStyle = "#ff8844";
-      ctx.lineWidth = 4;
-      ctx.shadowColor = "#ff6622";
-      ctx.shadowBlur = 14;
-      ctx.globalAlpha = 0.2;
+  /* Bullets: bright blue darts */
+  function drawBullets() {
+    glow(CORE_COLOR, 8);
+    ctx.lineWidth = 2;
+    for (let i = 0; i < bullets.length; i++) {
+      const b = bullets[i];
+      const a = Math.atan2(b.vy, b.vx);
       ctx.beginPath();
-      const speed = Math.hypot(c.vx, c.vy);
-      if (speed > 0) {
-        /* Normalize velocity for trail calculations */
-        const nvx = c.vx / speed;
-        const nvy = c.vy / speed;
-        ctx.moveTo(c.x - nvx * 12, c.y - nvy * 12);
-        ctx.lineTo(c.x + nvx * 4, c.y + nvy * 4);
-      } else {
-        ctx.moveTo(c.x, c.y);
-        ctx.lineTo(c.x + 4, c.y);
-      }
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-      /* Primary phosphor: bright, crisp streak */
-      ctx.strokeStyle = "#ffaa66";
-      ctx.lineWidth = 2;
-      ctx.shadowColor = "#ff6622";
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      if (speed > 0) {
-        const nvx = c.vx / speed;
-        const nvy = c.vy / speed;
-        ctx.moveTo(c.x - nvx * 8, c.y - nvy * 8);
-        ctx.lineTo(c.x + nvx * 2, c.y + nvy * 2);
-      } else {
-        ctx.moveTo(c.x, c.y);
-        ctx.lineTo(c.x + 2, c.y);
-      }
-      ctx.stroke();
-
-      /* Directional arrowhead at shot head: small vector triangle showing trajectory
-         Core Star Castle fidelity: cannon shots have clear directional indicators. */
-      if (speed > 0) {
-        const arrowSize = Math.min(5, speed * 0.6);
-        /* Arrowhead pointing in velocity direction */
-        const ax = c.vx / speed;
-        const ay = c.vy / speed;
-        /* Perpendicular: (-ay, ax) */
-        const px = -ay;
-        const py = ax;
-        /* Arrowhead: V-shape at shot head position */
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 1;
-        ctx.shadowColor = "#ffcc88";
-        ctx.shadowBlur = 5;
-        ctx.beginPath();
-        /* Tip of arrow at current shot position */
-        ctx.moveTo(c.x, c.y);
-        /* Left wing of V */
-        ctx.lineTo(c.x - ax * arrowSize + px * arrowSize * 0.5,
-                   c.y - ay * arrowSize + py * arrowSize * 0.5);
-        /* Right wing of V */
-        ctx.lineTo(c.x - ax * arrowSize - px * arrowSize * 0.5,
-                   c.y - ay * arrowSize - py * arrowSize * 0.5);
-        ctx.closePath();
-        ctx.stroke();
-      }
-
-      /* Hot core dot */
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 1;
-      ctx.shadowColor = "#ffcc88";
-      ctx.shadowBlur = 4;
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 1.5, 0, Math.PI * 2);
+      ctx.moveTo(b.x - Math.cos(a) * 3, b.y - Math.sin(a) * 3);
+      ctx.lineTo(b.x + Math.cos(a) * 3, b.y + Math.sin(a) * 3);
       ctx.stroke();
     }
     noGlow();
+  }
 
-    /* Player — wireframe ship, white phosphor, ghost-line bloom */
-    if (player.alive) {
-      const blink = player.invincible > 0 && Math.floor(Date.now() / 80) % 2 === 0;
-      if (!blink) {
-        ctx.save();
-        ctx.translate(player.x, player.y);
-        ctx.rotate(player.angle);
-
-        /* Thrust flame: wireframe line, warm phosphor */
-        if (player.thrusting) {
-          const flicker = Math.random() * 4 + 8;
-          ctx.strokeStyle = "#ff8844";
-          ctx.lineWidth = 2;
-          ctx.shadowColor = "#ff6622";
-          ctx.shadowBlur = 6;
-          ctx.beginPath();
-          ctx.moveTo(-16, 0);
-          ctx.lineTo(-16 - flicker, 0);
-          ctx.stroke();
-        }
-
-        /* Ghost-line bloom pass: dimmer, wider glow for phosphor bloom */
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 3.5;
-        ctx.shadowColor = "#aaddff";
-        ctx.shadowBlur = 14;
-        ctx.globalAlpha = 0.12;
-        ctx.beginPath();
-        ctx.moveTo(18, 0);
-        ctx.lineTo(-12, -10);
-        ctx.lineTo(-6, 0);
-        ctx.lineTo(-12, 10);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-
-        /* Ship body: crisp white phosphor wireframe */
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = "#aaddff";
-        ctx.shadowBlur = 6;
-        ctx.beginPath();
-        ctx.moveTo(18, 0);
-        ctx.lineTo(-12, -10);
-        ctx.lineTo(-6, 0);
-        ctx.lineTo(-12, 10);
-        ctx.closePath();
-        ctx.stroke();
-
-        /* Wing detail lines — inner structure for cabinet authenticity */
-        ctx.strokeStyle = "#aaddff";
-        ctx.lineWidth = 1;
-        ctx.shadowColor = "#88bbdd";
-        ctx.shadowBlur = 3;
-        ctx.beginPath();
-        ctx.moveTo(-6, 0);
-        ctx.lineTo(-14, -8);
-        ctx.moveTo(-6, 0);
-        ctx.lineTo(-14, 8);
-        ctx.stroke();
-
-        /* Cockpit detail — center forward line */
-        ctx.strokeStyle = "#88ccff";
-        ctx.lineWidth = 1;
-        ctx.shadowBlur = 2;
-        ctx.beginPath();
-        ctx.moveTo(8, 0);
-        ctx.lineTo(16, 0);
-        ctx.stroke();
-
-        noGlow();
-        ctx.restore();
+  /* Fuzzball: white scribbled noise circle */
+  function drawFuzzballs() {
+    glowThick(FUZZ_COLOR, 1.4, 16);
+    for (let i = 0; i < fuzzballs.length; i++) {
+      const f = fuzzballs[i];
+      const R = f.size * S;
+      ctx.beginPath();
+      for (let k = 0; k <= 14; k++) {
+        const a = (k / 14) * Math.PI * 2;
+        const jit = R * (0.75 + 0.35 * Math.sin(attractFrame * 0.35 + k * 2.1 + f.seed));
+        const x = f.x + Math.cos(a) * jit, y = f.y + Math.sin(a) * jit;
+        if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
-    }
-
-    /* Bullets — bright white phosphor sparks, blue glow, ghost-line bloom */
-    for (const b of bullets) {
-      /* Ghost-line bloom */
-      ctx.strokeStyle = "#aaccff";
-      ctx.lineWidth = 4;
-      ctx.shadowColor = "#88bbdd";
-      ctx.shadowBlur = 12;
-      ctx.globalAlpha = 0.15;
-      ctx.beginPath();
-      ctx.moveTo(b.x - b.vx * 0.8, b.y - b.vy * 0.8);
-      ctx.lineTo(b.x + b.vx * 0.3, b.y + b.vy * 0.3);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-      /* Primary phosphor: crisp white streak */
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
-      ctx.shadowColor = "#aaddff";
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      ctx.moveTo(b.x - b.vx * 0.5, b.y - b.vy * 0.5);
-      ctx.lineTo(b.x, b.y);
+      ctx.closePath();
       ctx.stroke();
     }
     noGlow();
+  }
 
-    /* Enemies — wireframe only, no filled centers, phosphor bloom */
-    for (const e of enemies) {
-      ctx.save();
-      ctx.translate(e.x, e.y);
-
-      if (e.type === "mine" && e.coreSpawned) {
-        /* Core-spawned mine: pulsing beacon circle (Star Castle signature) */
-        const pulse = 0.7 + 0.3 * Math.sin(Date.now() * 0.008);
-        const beaconR = e.size * pulse;
-        /* Ghost-line bloom */
-        ctx.strokeStyle = "#ffff00";
-        ctx.lineWidth = 4;
-        ctx.shadowColor = "#ffff00";
-        ctx.shadowBlur = 14;
-        ctx.globalAlpha = 0.12;
-        ctx.beginPath();
-        ctx.arc(0, 0, beaconR, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        /* Primary wireframe */
-        ctx.strokeStyle = "#ffff00";
-        ctx.lineWidth = 2;
-        ctx.shadowColor = "#ffff00";
-        ctx.shadowBlur = 8;
-        ctx.beginPath();
-        ctx.arc(0, 0, beaconR, 0, Math.PI * 2);
-        ctx.stroke();
-        /* Inner dot */
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 1;
-        ctx.shadowColor = "#ffffff";
-        ctx.shadowBlur = 3;
-        ctx.beginPath();
-        ctx.arc(0, 0, 2, 0, Math.PI * 2);
-        ctx.stroke();
-        /* Outer ring */
-        ctx.strokeStyle = "#ffaa00";
-        ctx.lineWidth = 1;
-        ctx.shadowColor = "#ff8800";
-        ctx.shadowBlur = 4;
-        ctx.beginPath();
-        ctx.arc(0, 0, beaconR + 3, 0, Math.PI * 2);
-        ctx.stroke();
-      } else if (e.type === "mine") {
-        /* Ghost-line bloom */
-        ctx.strokeStyle = e.color;
-        ctx.lineWidth = 3;
-        ctx.shadowColor = e.color;
-        ctx.shadowBlur = 10;
-        ctx.globalAlpha = 0.12;
-        ctx.beginPath();
-        for (let i = 0; i < 8; i++) {
-          const a = (i / 8) * Math.PI * 2;
-          const r = i % 2 === 0 ? e.size : e.size * 0.5;
-          if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
-          else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
-        }
-        ctx.closePath();
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        /* Primary wireframe */
-        ctx.strokeStyle = e.color;
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = e.color;
-        ctx.shadowBlur = 4;
-        ctx.beginPath();
-        for (let i = 0; i < 8; i++) {
-          const a = (i / 8) * Math.PI * 2;
-          const r = i % 2 === 0 ? e.size : e.size * 0.5;
-          if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
-          else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
-        }
-        ctx.closePath();
-        ctx.stroke();
-        /* Center crosshair */
-        ctx.lineWidth = 1;
-        ctx.shadowBlur = 2;
-        ctx.beginPath();
-        ctx.moveTo(-e.size * 0.3, 0); ctx.lineTo(e.size * 0.3, 0);
-        ctx.moveTo(0, -e.size * 0.3); ctx.lineTo(0, e.size * 0.3);
-        ctx.stroke();
-      } else if (e.type === "chaser") {
-        /* Ghost-line bloom */
-        ctx.strokeStyle = e.color;
-        ctx.lineWidth = 3;
-        ctx.shadowColor = e.color;
-        ctx.shadowBlur = 10;
-        ctx.globalAlpha = 0.12;
-        ctx.beginPath();
-        ctx.moveTo(0, -e.size);
-        ctx.lineTo(e.size * 0.75, 0);
-        ctx.lineTo(0, e.size);
-        ctx.lineTo(-e.size * 0.75, 0);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        /* Primary wireframe */
-        ctx.strokeStyle = e.color;
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = e.color;
-        ctx.shadowBlur = 4;
-        ctx.beginPath();
-        ctx.moveTo(0, -e.size);
-        ctx.lineTo(e.size * 0.75, 0);
-        ctx.lineTo(0, e.size);
-        ctx.lineTo(-e.size * 0.75, 0);
-        ctx.closePath();
-        ctx.stroke();
-        /* Center crosshair */
-        ctx.lineWidth = 1;
-        ctx.shadowBlur = 2;
-        ctx.beginPath();
-        ctx.moveTo(-e.size * 0.25, 0); ctx.lineTo(e.size * 0.25, 0);
-        ctx.moveTo(0, -e.size * 0.25); ctx.lineTo(0, e.size * 0.25);
-        ctx.stroke();
-      } else if (e.type === "fast") {
-        /* Ghost-line bloom */
-        ctx.strokeStyle = e.color;
-        ctx.lineWidth = 3;
-        ctx.shadowColor = e.color;
-        ctx.shadowBlur = 10;
-        ctx.globalAlpha = 0.12;
-        ctx.beginPath();
-        ctx.moveTo(0, -e.size);
-        ctx.lineTo(e.size * 0.85, e.size * 0.6);
-        ctx.lineTo(-e.size * 0.85, e.size * 0.6);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        /* Primary wireframe */
-        ctx.strokeStyle = e.color;
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = e.color;
-        ctx.shadowBlur = 4;
-        ctx.beginPath();
-        ctx.moveTo(0, -e.size);
-        ctx.lineTo(e.size * 0.85, e.size * 0.6);
-        ctx.lineTo(-e.size * 0.85, e.size * 0.6);
-        ctx.closePath();
-        ctx.stroke();
-        /* Center crosshair */
-        ctx.lineWidth = 1;
-        ctx.shadowBlur = 2;
-        ctx.beginPath();
-        ctx.moveTo(-e.size * 0.2, 0); ctx.lineTo(e.size * 0.2, 0);
-        ctx.moveTo(0, -e.size * 0.2); ctx.lineTo(0, e.size * 0.2);
-        ctx.stroke();
-      } else {
-        /* Tank: thicker primary line for visual weight */
-        /* Ghost-line bloom */
-        ctx.strokeStyle = e.color;
-        ctx.lineWidth = 4;
-        ctx.shadowColor = e.color;
-        ctx.shadowBlur = 12;
-        ctx.globalAlpha = 0.12;
-        ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-          const a = (i / 6) * Math.PI * 2;
-          if (i === 0) ctx.moveTo(Math.cos(a) * e.size, Math.sin(a) * e.size);
-          else ctx.lineTo(Math.cos(a) * e.size, Math.sin(a) * e.size);
-        }
-        ctx.closePath();
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        /* Primary wireframe */
-        ctx.strokeStyle = e.color;
-        ctx.lineWidth = 2;
-        ctx.shadowColor = e.color;
-        ctx.shadowBlur = 4;
-        ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-          const a = (i / 6) * Math.PI * 2;
-          if (i === 0) ctx.moveTo(Math.cos(a) * e.size, Math.sin(a) * e.size);
-          else ctx.lineTo(Math.cos(a) * e.size, Math.sin(a) * e.size);
-        }
-        ctx.closePath();
-        ctx.stroke();
-        /* Inner hexagon */
-        ctx.strokeStyle = "#ff88cc";
-        ctx.lineWidth = 1;
-        ctx.shadowBlur = 2;
-        ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-          const a = (i / 6) * Math.PI * 2 + Math.PI / 6;
-          if (i === 0) ctx.moveTo(Math.cos(a) * e.size * 0.5, Math.sin(a) * e.size * 0.5);
-          else ctx.lineTo(Math.cos(a) * e.size * 0.5, Math.sin(a) * e.size * 0.5);
-        }
-        ctx.closePath();
-        ctx.stroke();
-        /* Center crosshair */
-        ctx.strokeStyle = e.color;
-        ctx.beginPath();
-        ctx.moveTo(-e.size * 0.3, 0); ctx.lineTo(e.size * 0.3, 0);
-        ctx.moveTo(0, -e.size * 0.3); ctx.lineTo(0, e.size * 0.3);
-        ctx.stroke();
-      }
-
-      noGlow();
-      ctx.restore();
-    }
-
-    /* Particles — wireframe line segments, phosphor glow */
-    for (const p of particles) {
-      const alpha = p.life / p.maxLife;
-      ctx.strokeStyle = p.color;
-      ctx.lineWidth = 1.5;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 4;
-      ctx.globalAlpha = alpha;
-      const len = p.size * alpha;
+  function drawParticles() {
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const a = Math.max(0, p.life / p.maxLife);
+      ctx.globalAlpha = a;
+      glow(p.color, 6);
+      ctx.lineWidth = 1.6;
+      const ang = Math.atan2(p.vy, p.vx);
       ctx.beginPath();
-      ctx.moveTo(p.x - len, p.y);
-      ctx.lineTo(p.x + len, p.y);
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - Math.cos(ang) * 4, p.y - Math.sin(ang) * 4);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
     noGlow();
-
-    /* HUD */
-    drawHUD();
   }
 
-  /* ── Main loop ─────────────────────────────────────── */
-  function loop() {
-    update();
-    drawGame();
+  function glowText(text, x, y, size, color, align, blur) {
+    ctx.save();
+    ctx.font = "bold " + size + "px 'Courier New', monospace";
+    ctx.textAlign = align || "center";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = color;
+    ctx.shadowBlur = blur === undefined ? 12 : blur;
+    ctx.fillStyle = color;
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  /* ── HUD ───────────────────────────────────────────────────────────── */
+  function drawHUD() {
+    const yOff = safeInsets.top;
+    const fs = Math.max(14, Math.min(20, S * 0.035));
+    glowText(String(score).padStart(6, "0"), 18, 26 + yOff, fs, "#ffffff", "left");
+    glowText("1UP SCORE", 18, 26 + yOff + fs * 1.4, fs * 0.55, CORE_COLOR, "left", 6);
+    glowText(String(Math.max(highScore, gameOverScore)).padStart(6, "0"), W / 2, 26 + yOff, fs, "#ffd80a", "center");
+    glowText("HIGH SCORE", W / 2, 26 + yOff + fs * 1.4, fs * 0.55, CORE_COLOR, "center", 6);
+    glowText("LEVEL " + level, W - 18, 26 + yOff, fs * 0.8, "#ffffff", "right");
+    /* Ships remaining as tiny wedges */
+    for (let i = 0; i < Math.min(lives, 5); i++) {
+      const x = W - 24 - i * (fs + 6);
+      const yy = 26 + yOff + fs * 1.6;
+      glow(CORE_COLOR, 6);
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(x, yy - 5);
+      ctx.lineTo(x - 4, yy + 4);
+      ctx.lineTo(x + 4, yy + 4);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    noGlow();
+  }
+
+  /* ── Attract mode ──────────────────────────────────────────────────── */
+  function drawAttractShowcase() {
+    /* Rotating ring + mine demo behind the cards, purely decorative */
+    ctx.save();
+    const demoT = attractFrame;
+    for (let ri = 0; ri < 3; ri++) {
+      const R = S * RING_RADII[ri] * 0.9;
+      const seg = (Math.PI * 2) / RING_SEGMENTS;
+      const rot = demoT * ringRotSpeed(3) * RING_DIRS[ri];
+      glowThick(RING_COLORS[ri], Math.max(2, S * 0.005), 12);
+      for (let si = 0; si < RING_SEGMENTS; si++) {
+        if ((si + ri) % 5 === 3) continue; /* some simulated damage gaps */
+        arcSeg(W / 2, H / 2, R, rot + si * seg, rot + si * seg + seg * 0.8);
+      }
+    }
+    /* castle silhouette */
+    ctx.translate(W / 2, H / 2);
+    ctx.rotate(demoT * 0.01);
+    const r = coreRadius();
+    glow(CORE_COLOR, 10);
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(-r, r * 0.55); ctx.lineTo(-r * 0.55, -r * 0.1);
+    ctx.lineTo(r * 0.55, -r * 0.1); ctx.lineTo(r, r * 0.55);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, -r * 0.1, r * 0.42, Math.PI, 0); ctx.stroke();
+    ctx.restore();
+    /* orbiting mines */
+    glow(CORE_COLOR, 8);
+    ctx.lineWidth = 1.4;
+    for (let i = 0; i < 3; i++) {
+      const a = demoT * 0.02 + (i * Math.PI * 2) / 3;
+      const rr = S * 0.19 * 1.55;
+      const mx = W / 2 + Math.cos(a) * rr, my = H / 2 + Math.sin(a) * rr;
+      ctx.beginPath();
+      ctx.moveTo(mx, my - 5); ctx.lineTo(mx + 5, my); ctx.lineTo(mx, my + 5); ctx.lineTo(mx - 5, my);
+      ctx.closePath(); ctx.stroke();
+    }
+    noGlow();
+  }
+
+  function drawAttract() {
+    const cx = W / 2;
+    const titleY = H * 0.24;
+    if (attractCard === 0) {
+      const fs = Math.max(30, Math.min(64, S * 0.1));
+      glowText("STAR CASTLE", cx, titleY, fs, "#ffd80a", "center", 24);
+      glowText("2", cx + fs * 1.9, titleY - fs * 0.45, fs * 0.6, "#ff2a2a", "center", 18);
+      if (Math.floor(attractFrame / 30) % 2 === 0) {
+        glowText("PRESS FIRE TO PLAY", cx, H * 0.52, Math.max(16, S * 0.04), "#ffffff", "center", 10);
+      }
+      glowText("CREDIT 01", cx, H * 0.9, Math.max(11, S * 0.028), CORE_COLOR, "center", 6);
+    } else if (attractCard === 1) {
+      const fs = Math.max(14, S * 0.045);
+      glowText("OBJECT OF THE GAME", cx, H * 0.18, fs, "#ffd80a", "center", 12);
+      const lines = [
+        "DESTROY THE STAR CASTLE",
+        "SECTIONS REQUIRE TWO HITS",
+        "RING REGENERATES WHEN OUTER",
+        "RING IS DESTROYED",
+        "MINES HAVE NO POINTS VALUE",
+      ];
+      lines.forEach(function(ln, i) {
+        glowText(ln, cx, H * 0.3 + i * fs * 1.7, fs * 0.62, i === 4 ? "#ff8c1a" : "#ffffff", "center", 6);
+      });
+    } else if (attractCard === 2) {
+      const fs = Math.max(14, S * 0.045);
+      glowText("SCORING", cx, H * 0.18, fs, "#ffd80a", "center", 12);
+      const rows = [
+        ["OUTER RING SECTION", "30"],
+        ["MIDDLE RING SECTION", "40"],
+        ["INNER RING SECTION", "50"],
+        ["STAR CASTLE", "1440 + SHIP"],
+      ];
+      rows.forEach(function(row, i) {
+        glowText(row[0], cx - fs * 0.4, H * 0.32 + i * fs * 1.9, fs * 0.55, "#ffffff", "right", 5);
+        glowText(row[1], cx + fs * 0.6, H * 0.32 + i * fs * 1.9, fs * 0.55, RING_COLORS[2 - Math.min(2, i)], "left", 5);
+      });
+      glowText("MINES - NO POINTS", cx, H * 0.32 + 4 * fs * 1.9, fs * 0.5, CORE_COLOR, "center", 5);
+    } else {
+      const fs = Math.max(14, S * 0.045);
+      glowText("HIGH SCORES", cx, H * 0.18, fs, "#ffd80a", "center", 12);
+      for (let i = 0; i < HIGH_SCORE_SLOTS; i++) {
+        const s = highScoreTable[i];
+        glowText(String(i + 1), cx - fs * 2.2, H * 0.3 + i * fs * 1.8, fs * 0.6, CORE_COLOR, "left", 5);
+        glowText(s === undefined ? "------" : String(s).padStart(6, "0"), cx + fs * 2.2, H * 0.3 + i * fs * 1.8, fs * 0.6, i === 0 ? "#ffd80a" : "#ffffff", "right", 5);
+      }
+      glowText("LEFT / RIGHT TURN   THRUST   FIRE", cx, H * 0.88, fs * 0.5, CORE_COLOR, "center", 5);
+      glowText("M = MUTE", cx, H * 0.93, fs * 0.45, "#ffffff", "center", 4);
+    }
+  }
+
+  /* ── Game render ───────────────────────────────────────────────────── */
+  function drawGame() {
+    drawStars();
+    drawCastle();
+    drawRing(2);
+    drawRing(1);
+    drawRing(0);
+    drawMines();
+    drawBullets();
+    drawFuzzballs();
+    drawPlayer();
+    drawParticles();
+    drawHUD();
+    if (introTimer > 0) {
+      glowText("LEVEL " + level, W / 2, H * 0.34, Math.max(24, S * 0.07), "#ffffff", "center", 16);
+    }
+    if (state === "castleDead") {
+      if (collapseTimer % 20 < 12) {
+        glowText("STAR CASTLE DESTROYED", W / 2, H * 0.3, Math.max(16, S * 0.05), "#ffd80a", "center", 14);
+        glowText("EXTRA SHIP AWARDED", W / 2, H * 0.37, Math.max(12, S * 0.035), CORE_COLOR, "center", 8);
+      }
+    }
+  }
+
+  /* ── DOM overlays ──────────────────────────────────────────────────── */
+  function populateDeadOverlay() {
+    if (!deadContent) return;
+    deadContent.innerHTML =
+      '<p class="do-title">GAME OVER</p>' +
+      '<p class="do-score">FINAL SCORE: ' + score + '</p>' +
+      (gameOverScore >= highScore && gameOverScore > 0 ? '<p class="do-new">NEW HIGH SCORE!</p>' : '') +
+      '<p class="do-high">HIGH SCORE: ' + highScore + '</p>' +
+      '<p class="do-prompt">PRESS FIRE TO CONTINUE</p>';
+    setDeadOverlayVisible(true);
+  }
+
+  function setHUDVisible(v)   { if (hud)   hud.style.display = v ? "block" : "none"; }
+  function setDeadOverlayVisible(v) { if (deadOverlay) deadOverlay.classList.toggle("hidden", !v); }
+  function setAttractScreen(v) { if (attractScreen) attractScreen.classList.toggle("hidden", !v); }
+
+  /* ── Frame loop: fixed 60 Hz logic steps ──────────────────────────── */
+  let lastT = 0, acc = 0;
+  const FRAME = 1000 / 60;
+
+  function render() {
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, W, H);
+    if (state === "attract") { drawStars(); drawAttractShowcase(); drawAttract(); }
+    else if (state === "dead") { drawStars(); }
+    else drawGame();
+  }
+
+  function loop(now) {
+    if (!lastT) lastT = now;
+    acc += now - lastT;
+    lastT = now;
+    if (acc > FRAME * 5) acc = FRAME * 5;
+    while (acc >= FRAME) { update(); acc -= FRAME; }
+    render();
     requestAnimationFrame(loop);
   }
-  init();
-  loop();
 
-  /* Expose public API on window for browser integration */
-  window.initInput = initInput;
-  window.startGame  = startGame;
-  window.toggleMute = toggleMute;
-  window.drawGame   = drawGame;
-  window.init       = init;
-  window.checkShieldCollision = checkShieldCollision;
-  window.tryRegenRings = tryRegenRings;
-  window._SHIELD_RINGS = SHIELD_RINGS;
+  /* ── Boot ──────────────────────────────────────────────────────────── */
+  function init() {
+    resize();
+    initInput();
+    resetCastle();
+    resetPlayer(false);
+    setHUDVisible(false);
+    setDeadOverlayVisible(false);
+    requestAnimationFrame(loop);
+  }
+
+  init();
+
+  /* ── Test hooks ────────────────────────────────────────────────────── */
+  window._state = function() { return state; };
+  window._rings = function() { return rings; };
+  window._ringRadius = ringRadius;
+  window._ringLive = ringLive;
+  window._castle = castle;
   window._player = player;
-  window._core = core;
-  window._cannonShots = cannonShots;
-  window._findShieldGap = findShieldGap;
-  window._attractCard = () => attractCard;
-  window._attractCardTimer = () => attractCardTimer;
-  window._highScore = () => highScore;
-  window._saveHighScore = saveHighScore;
-  window._resetAttract = resetAttract;
-  window._advanceAttractCard = advanceAttractCard;
-  window._state = () => state;
-  window._safeInsets = () => safeInsets;
-  window._coreDestructionTimer = () => coreDestructionTimer;
-  window._debrisSpawned = () => debrisSpawned;
-  window._transitionTimer = () => transitionTimer;
-  window._seededRandom = seededRandom;
+  window._mines = mines;
+  window._bullets = bullets;
+  window._fuzzballs = fuzzballs;
+  window._score = function() { return score; };
+  window._lives = function() { return lives; };
+  window._level = function() { return level; };
+  window._startGame = function() { startGame(); };
+  window._step = function(n) { for (let i = 0; i < (n || 1); i++) update(); };
+  window._rayClear = rayClear;
+  window._sectionAt = sectionAt;
+  window._hitSection = hitSection;
+  window._hitPlayer = function() { const inv = player.invincible; player.invincible = 0; hitPlayer(); player.invincible = inv; };
+  window._killCastle = killCastle;
+  window._spawnMine = spawnMine;
+  window._resetMines = resetMines;
+  window._scores = { CASTLE: CASTLE_POINTS, SECTION: SECTION_POINTS };
+  window._consts = { SEGMENTS: RING_SEGMENTS, HITS: SECTION_HITS, MINES: MAX_MINES };
+  window._ringRotSpeed = ringRotSpeed;
+  window._mineSpeed = mineSpeed;
   window._cannonFireCooldown = cannonFireCooldown;
-  window._cannonShotSpeed = cannonShotSpeed;
-  window._coreTurnRate = coreTurnRate;
-  window._shieldRotationSpeed = shieldRotationSpeed;
-  window._enemyBaseSpeed = enemyBaseSpeed;
-  window._spawnInterval = spawnInterval;
-  window._spawnTimer = () => spawnTimer;
-  window._coreMineInterval = coreMineInterval;
-  window._coreMineTimer = () => coreMineTimer;
-  window._spawnCoreMine = spawnCoreMine;
-  window._REGEN_ANIM_FRAMES = REGEN_ANIM_FRAMES;
-  window._regenAnimFrames = () => player.regenAnimFrames;
-  window._regenCollRadii = () => player.regenCollRadii;
-  window._deathTimer = () => deathTimer;
-  window._deathExplosionX = () => deathExplosionX;
-  window._deathExplosionY = () => deathExplosionY;
-  window._lives = () => lives;
-  window._hitPlayer = hitPlayer;
-  window._drawDying = drawDying;
-  window._idleTimer = () => idleTimer;
-  window._highScoreTable = () => highScoreTable.slice();
-  window._insertHighScore = insertHighScore;
-  window._setHUDVisible = setHUDVisible;
-  window._setDeadOverlayVisible = setDeadOverlayVisible;
-  window._populateDeadOverlay = populateDeadOverlay;
-  window._inputInitialized = () => inputInitialized;
+  window._ramp = function() { return ramp; };
 })();
