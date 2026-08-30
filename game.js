@@ -12,10 +12,17 @@
        • Rings rotate in OPPOSITE directions to each other.
        • The player's ship attacks from OUTSIDE, shooting through the
          rotating gaps. A ship touching a live shield section dies.
-       • Exactly 3 MINES are launched by the castle. They orbit the
-         castle, then break loose and home in on the player. They pass
-         through the shields. No points for destroying them. Mines are
-         restored whenever the shield rings regenerate.
+       • SPARK MINES (user-spec behavior): a max battery of 3 sparks,
+         but they are SCHEDULED — level 1 gets one spark that appears
+         after ~60s, level 3 gets two, level 6+ gets all three. They
+         orbit briefly, then break loose and NEVER charge head-on into
+         gunfire: they swing in on lateral pincer arcs, jittering like
+         zero-gravity sparks, dodging incoming bullets. At higher levels
+         some lay back and ambush the player from the far side of the
+         map. Unlike the player ship they do NOT wrap — they bank off
+         the screen edges and come back across. They pass through the
+         shields. No points for destroying them. Sparks are restored
+         (at that level's count) whenever the shield rings regenerate.
        • The cannon tracks the player at all times and fires a large
          white-noise FUZZBALL whenever it has a clear line of fire
          (aligned gaps — and always, once the inner ring is down).
@@ -126,8 +133,51 @@
     } catch (e) {}
   }
 
+  /* ── Thrust engine: continuous detuned saw drone (user-spec rework) ── */
+  let thrustVoice = null;
+  function startThrustSound() {
+    if (!audioCtx || muted || thrustVoice) return;
+    try {
+      const t = audioCtx.currentTime;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.05, t + 0.06);
+      const lp = audioCtx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.setValueAtTime(160, t);
+      lp.Q.value = 0.7;
+      /* two detuned saws = fat vector-cabinet engine, no stutter pops */
+      const o1 = audioCtx.createOscillator();
+      o1.type = "sawtooth"; o1.frequency.setValueAtTime(47, t);
+      const o2 = audioCtx.createOscillator();
+      o2.type = "sawtooth"; o2.frequency.setValueAtTime(48.7, t);
+      const o2g = audioCtx.createGain(); o2g.gain.value = 0.6;
+      /* slow filter wobble so it breathes instead of buzzing */
+      const lfo = audioCtx.createOscillator();
+      lfo.type = "sine"; lfo.frequency.value = 7.5;
+      const lfoGain = audioCtx.createGain(); lfoGain.gain.value = 55;
+      lfo.connect(lfoGain); lfoGain.connect(lp.frequency);
+      o1.connect(lp); o2.connect(o2g); o2g.connect(lp);
+      lp.connect(g); g.connect(masterGain);
+      o1.start(t); o2.start(t); lfo.start(t);
+      thrustVoice = { o1, o2, lfo, g };
+    } catch (e) {}
+  }
+  function stopThrustSound() {
+    if (!thrustVoice) return;
+    try {
+      const t = audioCtx.currentTime;
+      thrustVoice.g.gain.cancelScheduledValues(t);
+      thrustVoice.g.gain.setValueAtTime(Math.max(0.0001, thrustVoice.g.gain.value), t);
+      thrustVoice.g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+      thrustVoice.o1.stop(t + 0.15);
+      thrustVoice.o2.stop(t + 0.15);
+      thrustVoice.lfo.stop(t + 0.15);
+    } catch (e) {}
+    thrustVoice = null;
+  }
+
   function sfxShoot()    { playTone(980, 0.05, "square", 0.07, 420); }
-  function sfxThrust()   { thrustTimer++; if (thrustTimer % 7 !== 0) return; playTone(85, 0.05, "triangle", 0.05, 60); }
   function sfxRingHit()  { playTone(1600, 0.05, "square", 0.09, 1100); }
   function sfxRingBreak(){ playTone(700, 0.12, "sawtooth", 0.11, 180); }
   function sfxFuzzball() { playNoise(0.5, 0.16, 3400, 500); playTone(140, 0.25, "sawtooth", 0.08, 90); }
@@ -277,8 +327,8 @@
   const CORE_RADIUS = 0.052;        /* x S: castle */
   const CASTLE_POINTS = 1440;       /* original manual: 1440 + extra ship */
   const SECTION_POINTS = [50, 40, 30]; /* inner/middle/outer — documented choice */
-  const MAX_MINES = 3;              /* original: exactly three sparks */
-  const MINE_ORBIT_FRAMES = 360;    /* mines orbit ~6s, then break loose */
+  const MAX_MINES = 3;              /* max spark battery (3, but scheduled) */
+  const MINE_ORBIT_FRAMES = 180;   /* sparks orbit ~3s, then break loose */
   const MAX_PLAYER_BULLETS = 2;     /* classic vector-shooter shot limit */
   const PLAYER_FIRE_CD = 9;
   const COLLIDE_BAND = 0.016;       /* ring hit band (x S) */
@@ -294,6 +344,11 @@
   function fuzzSpeed(level)           { return Math.min(5.2, 2.4 + level * 0.28); }
   function mineSpeed(level, ramp)     { return Math.min(5.0, (0.85 + level * 0.14) * (1 + ramp)); }
   function mineTurnRate(level, ramp)  { return Math.min(0.045, (0.014 + level * 0.002) * (1 + ramp)); }
+  /* Spark deployment schedule (user-spec): no sparks attack on level 1
+     start — one appears after ~60s, two from level 3, three from level 6. */
+  function sparkCountForLevel(lv) { return lv >= 6 ? 3 : lv >= 3 ? 2 : 1; }
+  function sparkFirstDelay(lv)    { return Math.max(900, 3600 - (lv - 1) * 450); } /* ~60s on lvl 1 */
+  function sparkGap(lv)           { return Math.max(600, 1200 - (lv - 1) * 100); }
 
   /* ── Game state ────────────────────────────────────────────────────── */
   let state = "attract"; /* attract | playing | dying | castleDead | dead */
@@ -366,7 +421,9 @@
 
   let bullets = [];     /* player shots */
   let fuzzballs = [];   /* castle fuzzball shots */
-  let mines = [];       /* exactly three, restored on regen */
+  let mines = [];       /* spark battery, deployed per level schedule */
+  let sparkScheduled = 0;   /* sparks waiting to deploy this level */
+  let sparkTimer = 0;       /* frames until the next scheduled deploy */
   let particles = [];
   let debris = [];
 
@@ -411,13 +468,16 @@
     player.invincible = 120;
     player.thrusting = false;
     thrustTimer = 0;
+    stopThrustSound();
     setTouch("left", false); setTouch("right", false);
     setTouch("thrust", false); setTouch("fire", false);
   }
 
-  /* Mines are launched from the core and orbit the castle (signature). */
-  function spawnMine(i) {
-    const a = (Math.PI * 2 * (i || 0)) / MAX_MINES + attractFrame * 0.01;
+  /* Sparks are launched from the core and orbit the castle (signature),
+     then attack in lateral pincer arcs (never head-on). Deployment is
+     scheduled per level — they do NOT all show up on level 1. */
+  function spawnMine(i, role) {
+    const a = (Math.PI * 2 * (i || 0)) / Math.max(1, sparkCountForLevel(level)) + attractFrame * 0.01;
     const r = coreRadius() + 6;
     const sp = mineSpeed(level, ramp);
     mines.push({
@@ -426,13 +486,33 @@
       vx: -Math.sin(a) * sp, vy: Math.cos(a) * sp,
       age: 0, loose: false, orbitDir: 1, size: 0.008,
       angle: 0,
+      role: role || "pincer",          /* pincer | ambusher */
+      side: (mines.length % 2 === 0) ? 1 : -1, /* pincer flank */
+      sparkPhase: Math.random() * Math.PI * 2,  /* vector jitter seed */
+      dodge: 0,                         /* frames of active bullet-dodge */
+      trail: [],                      /* zero-g spark trail */
     });
     sfxMineLaunch();
   }
 
   function resetMines() {
     mines.length = 0;
-    for (let i = 0; i < MAX_MINES; i++) spawnMine(i);
+    /* Schedule this level's battery: nothing attacks immediately on
+       level 1; the first spark breaks loose after ~60s. */
+    sparkScheduled = sparkCountForLevel(level);
+    sparkTimer = sparkFirstDelay(level);
+  }
+
+  function deployScheduledSparks() {
+    if (sparkScheduled <= 0 || sparkTimer > 0) return;
+    if (mines.length >= MAX_MINES) { sparkTimer = 30; return; }
+    /* Higher levels: the LAST spark of the battery lays back as an
+       ambusher so the attack never comes from one direction only. */
+    const battery = sparkCountForLevel(level);
+    const ambusher = level >= 2 && battery >= 2 && sparkScheduled === 1 && mines.length > 0;
+    spawnMine(mines.length, ambusher ? "ambusher" : "pincer");
+    sparkScheduled--;
+    sparkTimer = sparkGap(level);
   }
 
   function resetRings() {
@@ -572,8 +652,46 @@
     return live / (3 * RING_SEGMENTS);
   }
 
-  /* ── Mines: orbit the castle, then break loose and home in ─────────── */
+  /* ── Spark mines: orbit, then lateral pincer attacks (user-spec) ──── */
+  /* Sparks NEVER steer straight at the ship (that just flies into the
+     player's own gunfire). They swing in on offset flank arcs, jitter
+     their vectors like zero-gravity sparks, veer off an oncoming
+     bullet, and bank off screen edges instead of wrapping. Ambushers
+     hang back on the far side of the map to catch the player later. */
+  function nearestBulletThreat(m) {
+    let best = null, bestD = 1e9;
+    for (let i = 0; i < bullets.length; i++) {
+      const b = bullets[i];
+      const d = dist(b.x, b.y, m.x, m.y);
+      if (d > 90) continue;
+      /* only bullets that travel roughly toward this spark matter */
+      const toSpark = angTo(b.x, b.y, m.x, m.y);
+      const bDir = Math.atan2(b.vy, b.vx);
+      if (Math.abs(angDiff(toSpark, bDir)) < 0.9 && d < bestD) { bestD = d; best = b; }
+    }
+    return best;
+  }
+
+  function bounceEdges(m) {
+    const m0 = 10;
+    let hit = false;
+    if (m.x < m0)        { m.x = m0;        m.vx =  Math.abs(m.vx); hit = true; }
+    else if (m.x > W-m0) { m.x = W - m0;  m.vx = -Math.abs(m.vx); hit = true; }
+    if (m.y < m0)        { m.y = m0;        m.vy =  Math.abs(m.vy); hit = true; }
+    else if (m.y > H-m0) { m.y = H - m0;  m.vy = -Math.abs(m.vy); hit = true; }
+    if (hit) {
+      /* fold the flank-side preference so the spark comes back across */
+      const sp = mineSpeed(level, ramp);
+      const cur = Math.atan2(m.vy, m.vx);
+      m.vx = Math.cos(cur) * sp; m.vy = Math.sin(cur) * sp;
+      m.side = -m.side;
+    }
+    return hit;
+  }
+
   function updateMines() {
+    if (sparkTimer > 0) sparkTimer--;
+    deployScheduledSparks();
     const sp = mineSpeed(level, ramp);
     const turn = mineTurnRate(level, ramp);
     const orbitR = coreRadius() + S * 0.06;
@@ -581,10 +699,13 @@
       const m = mines[i];
       m.age++;
       m.angle += 0.08;
+      let want;
       if (!m.loose) {
         /* Orbit: steer perpendicular around the castle at fixed radius */
         const toC = angTo(m.x, m.y, castle.x, castle.y);
-        const want = toC + Math.PI / 2 * m.orbitDir;
+        want = toC + Math.PI / 2 * m.orbitDir;
+        /* zero-gravity spark shimmer while it orbits */
+        want += Math.sin(attractFrame * 0.25 + m.sparkPhase) * 0.12;
         const cur = Math.atan2(m.vy, m.vx);
         const step = clamp(angDiff(want, cur), -0.05, 0.05);
         const na = cur + step;
@@ -598,16 +719,61 @@
         }
         if (m.age > MINE_ORBIT_FRAMES) m.loose = true;
       } else {
-        /* Loose: home in on the player */
-        const want = angTo(m.x, m.y, player.x, player.y);
+        const dP = dist(m.x, m.y, player.x, player.y);
+        const toP = angTo(m.x, m.y, player.x, player.y);
+        if (m.role === "ambusher") {
+          /* Lay back on the far side of the map until the player comes
+             close, then break into a fresh flank charge. */
+          const hold = Math.min(W, H) * 0.42;
+          const cPull = angTo(m.x, m.y, castle.x, castle.y);
+          if (dP < hold * 0.6) {
+            /* player crossed into range — flank strike from behind */
+            want = toP + m.side * Math.PI * 0.5;
+          } else if (dP < hold) {
+            /* SKIRMISH: surge away (sparks have no gravity to fall back
+               on — they vector-change), then sweep back in next phase */
+            const phase = Math.floor(attractFrame * 0.01 + m.sparkPhase) % 3;
+            if (phase === 0) want = toP + Math.PI * 0.8 * m.side;   /* back off */
+            else if (phase === 1) want = toP;                        /* surge    */
+            else want = toP + m.side * Math.PI * 0.5;                /* flank    */
+          } else {
+            /* patrol the far side: orbit the castle at long range */
+            want = cPull + Math.PI / 2 * (m.side >= 0 ? 1 : -1);
+          }
+        } else {
+          /* Pincer: aim at an offset FLANK of the ship, not at the
+             ship itself, so the approach arc enters from the side. */
+          const flank = Math.min(90, 40 + dP * 0.25);
+          want = toP + m.side * (Math.PI / 2) * clamp(flank / 60, 0.45, 1);
+          /* very close & nearly abeam: cut the arc inward to connect */
+          if (dP < 60) want = toP + m.side * 0.35;
+          /* spark shimmer: constantly changing vectors, gravity-free */
+          want += Math.sin(attractFrame * 0.18 + m.sparkPhase) * 0.35;
+        }
+        /* dodge: oncoming bullet → swing perpendicular, never head-on */
+        const threat = nearestBulletThreat(m);
+        if (threat) m.dodge = 18;
+        if (m.dodge > 0) {
+          m.dodge--;
+          const cur0 = Math.atan2(m.vy, m.vx);
+          const away = angDiff(toP, cur0) >= 0 ? Math.PI / 2 : -Math.PI / 2;
+          want = toP + away;
+        }
         const cur = Math.atan2(m.vy, m.vx);
-        const step = clamp(angDiff(want, cur), -turn, turn);
+        /* smarter at higher levels: the turn closes on the arc faster */
+        const smartTurn = turn * (1 + Math.min(0.8, level * 0.12));
+        const step = clamp(angDiff(want, cur), -smartTurn, smartTurn);
         const na = cur + step;
         m.vx = Math.cos(na) * sp; m.vy = Math.sin(na) * sp;
       }
       m.x += m.vx; m.y += m.vy;
       m.size = 0.008 + Math.min(0.006, m.age * 0.00002);
-      wrap(m);
+      bounceEdges(m);
+      /* pack the spark trail behind it: newest head, older tail —
+         spread backwards along its own vector so it streaks like a
+         gravity-free spark */
+      m.trail.push({ x: m.x, y: m.y });
+      if (m.trail.length > 9) m.trail.shift();
     }
   }
 
@@ -647,6 +813,7 @@
     if (!player.alive || player.invincible > 0 || state !== "playing") return;
     player.alive = false;
     lives--;
+    stopThrustSound();
     sfxDeath();
     burstParticles(player.x, player.y, CORE_COLOR, 26);
     dyingTimer = 110;
@@ -702,6 +869,8 @@
     setDeadOverlayVisible(false);
     score = 0; lives = 3; level = 1; levelFrames = 0; ramp = 0;
     resetRings(); resetCastle(); mines.length = 0;
+    sparkScheduled = 0; sparkTimer = 0;
+    stopThrustSound();
     bullets.length = 0; fuzzballs.length = 0; particles.length = 0; debris.length = 0;
     attractCard = 0; attractCardTimer = 0;
     setHUDVisible(false);
@@ -796,7 +965,9 @@
       if (player.thrusting) {
         player.vx += Math.cos(player.angle) * thrust;
         player.vy += Math.sin(player.angle) * thrust;
-        sfxThrust();
+        startThrustSound();
+      } else {
+        stopThrustSound();
       }
       /* Terminal drift decay — cabinet-era feel */
       player.vx *= 0.996; player.vy *= 0.996;
@@ -1059,24 +1230,36 @@
     noGlow();
   }
 
-  /* Mines: small spinning diamond — same blue as playfield overlay */
+  /* Sparks: bright jittery streaks with a trailing tail (no diamond) */
   function drawMines() {
-    glow(CORE_COLOR, 8);
-    ctx.lineWidth = 1.4;
+    glowThick("#ffe9a0", 1.6, 14);
     for (let i = 0; i < mines.length; i++) {
       const m = mines[i];
-      const sz = Math.max(4, m.size * S);
+      const sz = Math.max(3, m.size * S);
+      const a = Math.atan2(m.vy, m.vx);
+      /* tail: fade along the back-vector */
       ctx.save();
-      ctx.translate(m.x, m.y);
-      ctx.rotate(m.angle);
+      ctx.globalAlpha = 0.35;
       ctx.beginPath();
-      ctx.moveTo(0, -sz); ctx.lineTo(sz, 0); ctx.lineTo(0, sz); ctx.lineTo(-sz, 0);
-      ctx.closePath();
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(-sz * 0.4, 0); ctx.lineTo(sz * 0.4, 0);
+      ctx.moveTo(m.x, m.y);
+      ctx.lineTo(m.x - Math.cos(a) * sz * 3.2, m.y - Math.sin(a) * sz * 3.2);
       ctx.stroke();
       ctx.restore();
+      /* head: random 3-armed spark crackle, re-rolled every few frames */
+      glowThick("#ffffff", 1.5, 16);
+      const seed = Math.floor(attractFrame * 0.5) + i * 7;
+      ctx.beginPath();
+      for (let k = 0; k < 3; k++) {
+        const sa = a + Math.sin(seed * 1.7 + k * 2.4) * 2.1 + k * 2.09;
+        const sl = sz * (0.8 + ((Math.sin(seed * 2.3 + k * 3.1) + 1) * 0.5) * 1.1);
+        ctx.moveTo(m.x, m.y);
+        ctx.lineTo(m.x + Math.cos(sa) * sl, m.y + Math.sin(sa) * sl);
+      }
+      ctx.stroke();
+      ctx.fillStyle = "#fffbe8";
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, Math.max(1.2, sz * 0.42), 0, Math.PI * 2);
+      ctx.fill();
     }
     noGlow();
   }
@@ -1350,7 +1533,7 @@
   window._lives = function() { return lives; };
   window._level = function() { return level; };
   window._startGame = function() { startGame(); };
-  window._step = function(n) { for (let i = 0; i < (n || 1); i++) update(); };
+  window._step = function(n) { idleTimer = 0; for (let i = 0; i < (n || 1); i++) { update(); idleTimer = 0; } };
   window._rayClear = rayClear;
   window._sectionAt = sectionAt;
   window._hitSection = hitSection;
@@ -1358,6 +1541,9 @@
   window._killCastle = killCastle;
   window._spawnMine = spawnMine;
   window._resetMines = resetMines;
+  window._sparkState = function() { return { scheduled: sparkScheduled, timer: sparkTimer, active: mines.length }; };
+  window._sparkCountForLevel = sparkCountForLevel;
+  window._sparkFirstDelay = sparkFirstDelay;
   window._scores = { CASTLE: CASTLE_POINTS, SECTION: SECTION_POINTS };
   window._consts = { SEGMENTS: RING_SEGMENTS, HITS: SECTION_HITS, MINES: MAX_MINES };
   window._ringRotSpeed = ringRotSpeed;
