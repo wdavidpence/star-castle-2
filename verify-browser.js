@@ -44,7 +44,7 @@ function check(cond, msg) {
     castle: { x: window._castle.x, y: window._castle.y },
     mines: window._mines.length,
     spark: (window.__firstDelay = window._sparkFirstDelay(1), (function(){ var s = window._sparkState(); s.timerMax = window.__firstDelay; return s; })()),
-    ringSections: window._rings().map(r => r.sections.filter(h => h === 2).length),
+    ringSections: window._rings().map((r,i) => r.sections.filter(h => h === window._consts.HITS[i]).length),
     player: { x: window._player.x, y: window._player.y },
   }));
   check(st.state === 'playing', 'startGame enters playing');
@@ -53,23 +53,26 @@ function check(cond, msg) {
   check(st.ringSections.every(n => n === 12), '3 rings x 12 intact sections');
   check(Math.hypot(st.player.x - 640, st.player.y - 400) > 150, 'player spawns outside the rings');
 
-  // two hits per section
+  // tiered toughness: outer 5 / middle 6 / inner 7 hp, 1 dmg per hit
   const sec = await page.evaluate(() => {
+    const r = window._rings();
+    const start = { outer: r[2].sections[0], mid: r[1].sections[0], inner: r[0].sections[0] };
     window._hitSection(2, 0);
-    const one = window._rings()[2].sections[0];
-    window._hitSection(2, 0);
-    const two = window._rings()[2].sections[0];
-    return { one, two };
+    const one = r[2].sections[0];
+    for (let i = 0; i < 4; i++) window._hitSection(2, 0);
+    const dead = r[2].sections[0];
+    return { start, one, dead };
   });
-  check(sec.one === 1, 'section damaged after 1 hit (2->1)');
-  check(sec.two === 0, 'section destroyed after 2 hits (1->0)');
+  check(sec.start.outer === 5 && sec.start.mid === 6 && sec.start.inner === 7, 'tiered hp: outer 5 / middle 6 / inner 7');
+  check(sec.one === 4, 'one shot chips outer section (5->4)');
+  check(sec.dead === 0, 'outer section destroyed after 5 hits');
 
   // points per section, none for mines
   const pts = await page.evaluate(() => {
     const s = window._score();
-    window._hitSection(2, 1); window._hitSection(2, 1);
+    for (let i = 0; i < 5; i++) window._hitSection(2, 1);
     const a = window._score();
-    window._hitSection(0, 0); window._hitSection(0, 0);
+    for (let i = 0; i < 7; i++) window._hitSection(0, 0);
     const b = window._score();
     return { outer: a - s, inner: b - a };
   });
@@ -95,7 +98,7 @@ function check(cond, msg) {
     const r2 = window._rings()[2];
     const pend = [];
     for (let i = 0; i < 12; i++) { if (r2.sections[i] > 0) pend.push(i); }
-    pend.forEach(i => { window._hitSection(2, i); window._hitSection(2, i); });
+    pend.forEach(i => { for (let k = 0; k < 5; k++) window._hitSection(2, i); });
     const s = window._sparkState();
     return { liveOuter: window._ringLive(2), bloom: window._rings()[0].bloom, mines: window._mines.length, scheduled: s.scheduled, liveAll: [window._ringLive(0), window._ringLive(1), window._ringLive(2)] };
   });
@@ -210,7 +213,7 @@ function check(cond, msg) {
     const aim = Math.atan2(window._player.y - window._castle.y, window._player.x - window._castle.x);
     for (let i = 0; i < 3; i++) {
       const s = window._sectionAt(i, aim);
-      window._hitSection(i, s); window._hitSection(i, s);
+      for (let k = 0; k < window._consts.HITS[i]; k++) window._hitSection(i, s);
     }
   });
   const fired = await page.evaluate(async () => {
@@ -253,14 +256,14 @@ function check(cond, msg) {
 
   // slow shield regen: destroy one outer section, fast-forward, it blooms back
   const regenSlow = await page.evaluate(() => {
-    window._hitSection(1, 5); window._hitSection(1, 5);
+    for (let k = 0; k < 6; k++) window._hitSection(1, 5);
     const dead = window._rings()[1].sections[5] === 0;
     window._step(1240); /* regen cadence 1160 @lvl2 + grace margin */
     const back = window._rings()[1].sections[5];
     return { dead, back, grace: window._rings()[1].regen ? window._rings()[1].regen[5] : -1 };
   });
   check(regenSlow.dead, 'section destroy still works');
-  check(regenSlow.back === 2, 'destroyed shield section regenerates over time (health restored)');
+  check(regenSlow.back === 6, 'destroyed shield section regenerates to full tier hp (middle=6)');
 
   // player death -> dying state
   await page.evaluate(() => { window._hitPlayer(); });

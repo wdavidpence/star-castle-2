@@ -48,7 +48,7 @@ assert(js.includes('function rayClear'), 'defines rayClear (gap fire-line)');
 
 // Fidelity constants from the original arcade
 assert(js.includes('RING_SEGMENTS = 12'), '12 shield sections per ring (original)');
-assert(js.includes('SECTION_HITS  = 2'), 'two hits per section (original)');
+assert(js.includes('SECTION_HP    = [7, 6, 5]'), 'tiered toughness: outer 5 / middle 6 / inner 7 hp (~20% per tier)');
 assert(js.includes('CASTLE_POINTS = 1440'), 'castle worth 1440 points (original manual)');
 assert(js.includes('MAX_MINES = 3'), 'exactly three mines (original)');
 assert(js.includes('EXTRA SHIP') || js.includes('lives + 1'), 'extra ship on castle destruction');

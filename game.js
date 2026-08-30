@@ -8,7 +8,8 @@
      FIDELITY MODEL (original arcade rules):
        • The central CASTLE (turret) sits dead center, defended by 3
          concentric rotating shield rings of 12 independent sections each.
-         Every section takes TWO hits to destroy.
+         Tiered toughness: each deeper ring is ~20% tougher than the one
+         outside it — outer 5 hp, middle 6 hp, inner 7 hp per section.
        • Rings rotate in OPPOSITE directions to each other.
        • The player's ship attacks from OUTSIDE, shooting through the
          rotating gaps. A ship touching a live shield section dies.
@@ -319,7 +320,10 @@
 
   /* ── Fidelity constants ────────────────────────────────────────────── */
   const RING_SEGMENTS = 12;          /* original: 12 sections per ring */
-  const SECTION_HITS  = 2;           /* original: two hits per section */
+  /* Tiered shield toughness (user-spec): each deeper ring is ~20%
+     tougher than the one outside it — outer 5 hp, middle 6 hp (~+20%),
+     inner 7 hp (~+20% over middle). Every shot deals 1 hp of damage. */
+  const SECTION_HP    = [7, 6, 5];   /* inner, middle, outer */
   const RING_RADII  = [0.115, 0.152, 0.19]; /* inner, middle, outer (x S) */
   const RING_DIRS   = [1, -1, 1];   /* oppositely rotating rings */
   /* Color overlay: rings YELLOW / ORANGE / RED from outer to inner */
@@ -413,12 +417,12 @@
 
   /* Rings: index 0 = inner, 1 = middle, 2 = outer.
      Each section health: 2 intact, 1 damaged, 0 destroyed. */
-  function freshSections() {
+  function freshSections(ri) {
     const a = [];
-    for (let i = 0; i < RING_SEGMENTS; i++) a.push(SECTION_HITS);
+    for (let i = 0; i < RING_SEGMENTS; i++) a.push(SECTION_HP[ri]);
     return a;
   }
-  function freshRing(i) { return { rot: 0, sections: freshSections(), bloom: 0, lastHit: freshTimes(), regen: freshTimes() }; }
+  function freshRing(i) { return { rot: 0, sections: freshSections(i), bloom: 0, lastHit: freshTimes(), regen: freshTimes() }; }
   function freshTimes() {
     const a = [];
     for (let k = 0; k < RING_SEGMENTS; k++) a.push(0);
@@ -602,7 +606,7 @@
       for (let si = 0; si < RING_SEGMENTS; si++) {
         if (ring.sections[si] > 0 || ring.bloom > 0) continue;
         if (levelFrames - ring.lastHit[si] >= every) {
-          ring.sections[si] = SECTION_HITS;
+          ring.sections[si] = SECTION_HP[ri];
           ring.regen[si] = REGEN_ANIM_FRAMES; /* slow bright bloom-in */
         }
       }
@@ -615,7 +619,7 @@
     if (before <= 0) return;
     ring.sections[segIdx] = before - 1;
     ring.lastHit[segIdx] = levelFrames;
-    if (ring.sections[segIdx] === 1) {
+    if (ring.sections[segIdx] > 0) {
       sfxRingHit();
       spawnSparks(ringIdx, segIdx, 4);
     } else {
@@ -639,7 +643,7 @@
       rings[i].lastHit = rings[i - 1].lastHit.slice();
       rings[i].regen = rings[i - 1].regen.slice();
     }
-    rings[0].sections = freshSections();
+    rings[0].sections = freshSections(0);
     rings[0].bloom = REGEN_ANIM_FRAMES;
     /* Mines restored when rings regenerate */
     resetMines();
@@ -1161,6 +1165,7 @@
     const thickness = Math.max(2.2, S * 0.006);
     for (let si = 0; si < RING_SEGMENTS; si++) {
       const hp = ring.sections[si];
+      const SECTION_HITS = SECTION_HP[ri]; /* per-ring max hp */
       if (hp <= 0) {
         /* gap ticks at the broken section edges */
         const a0 = ring.rot + si * seg;
@@ -1187,16 +1192,21 @@
       const a0 = ring.rot + si * seg;
       const a1 = a0 + arcCover;
       if (hp === SECTION_HITS) {
-        glowThick(color, thickness, 14);
-        ctx.globalAlpha = 0.22;
+        /* full-health: bold ring color (like the attract showcase),
+           thickness tiered so inner reads visibly tougher than outer */
+        const tierW = thickness * (1 + (2 - ri) * 0.22); /* inner thickest */
+        glowThick(color, tierW, 16);
+        ctx.globalAlpha = 0.85;
+        arcSeg(castle.x, castle.y, R, a0, a1);
+        ctx.globalAlpha = 0.5;
+        glowThick(RING_CORES[ri], Math.max(1, tierW * 0.4), 8);
         arcSeg(castle.x, castle.y, R, a0, a1);
         ctx.globalAlpha = 1;
-        glowThick("#ffffff", Math.max(1, thickness * 0.45), 8);
-        arcSeg(castle.x, castle.y, R, a0, a1);
       } else {
-        /* damaged: dashed, dimmer */
-        glowThick(color, Math.max(1.4, thickness * 0.6), 8);
-        ctx.globalAlpha = 0.55;
+        /* damaged: dashed, dimmer, thinned by remaining hp */
+        const frac = hp / SECTION_HP[ri];
+        glowThick(color, Math.max(1.2, thickness * (0.35 + 0.45 * frac)), 8);
+        ctx.globalAlpha = 0.25 + 0.45 * frac;
         dashedArc(castle.x, castle.y, R, a0, a1, S * 0.008);
         ctx.globalAlpha = 1;
       }
@@ -1205,41 +1215,121 @@
   }
 
   /* Castle: low vector fort silhouette + tracking barrel */
+  /* Castle: triple-barrel "AAA" vector super-fort */
   function drawCastle() {
     if (!castle.alive && collapseTimer <= 0) return;
     const r = coreRadius();
+    const ax = castle.x, ay = castle.y;
+    /* ── outer hex framework, counter-rotating with the rings ── */
+    glow(CORE_COLOR, 6);
+    ctx.lineWidth = 1.2;
+    ctx.globalAlpha = 0.5;
+    const hexRot = attractFrame * 0.004;
+    ctx.beginPath();
+    for (let k = 0; k <= 6; k++) {
+      const ha = hexRot + (k * Math.PI) / 3;
+      const hx = ax + Math.cos(ha) * r * 1.5, hy = ay + Math.sin(ha) * r * 1.5;
+      if (k === 0) ctx.moveTo(hx, hy); else ctx.lineTo(hx, hy);
+      /* node ticks at alternating vertices */
+      if (k % 2 === 0) {
+        ctx.moveTo(hx, hy);
+        ctx.lineTo(ax + Math.cos(ha) * r * 1.72, ay + Math.sin(ha) * r * 1.72);
+      }
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    /* ── stepped fort hull: wide base, tapered second deck ── */
     glow(CORE_COLOR, 12);
     ctx.lineWidth = 1.8;
-    /* Base fort: wide flat hull with dome */
     ctx.beginPath();
-    ctx.moveTo(castle.x - r, castle.y + r * 0.55);
-    ctx.lineTo(castle.x - r * 0.55, castle.y - r * 0.1);
-    ctx.lineTo(castle.x + r * 0.55, castle.y - r * 0.1);
-    ctx.lineTo(castle.x + r, castle.y + r * 0.55);
+    ctx.moveTo(ax - r * 1.05, ay + r * 0.62);
+    ctx.lineTo(ax - r * 0.95, ay + r * 0.34);
+    ctx.lineTo(ax - r * 0.62, ay + r * 0.34);
+    ctx.lineTo(ax - r * 0.55, ay + r * 0.08);
+    ctx.lineTo(ax + r * 0.55, ay + r * 0.08);
+    ctx.lineTo(ax + r * 0.62, ay + r * 0.34);
+    ctx.lineTo(ax + r * 0.95, ay + r * 0.34);
+    ctx.lineTo(ax + r * 1.05, ay + r * 0.62);
+    ctx.closePath();
     ctx.stroke();
-    /* Dome */
+    /* base skirt crenellations */
+    ctx.lineWidth = 1.1;
     ctx.beginPath();
-    ctx.arc(castle.x, castle.y - r * 0.1, r * 0.42, Math.PI, 0);
+    for (let k = -2; k <= 2; k++) {
+      const cxb = ax + k * r * 0.42;
+      ctx.moveTo(cxb - r * 0.09, ay + r * 0.62);
+      ctx.lineTo(cxb - r * 0.09, ay + r * 0.78);
+      ctx.lineTo(cxb + r * 0.09, ay + r * 0.78);
+      ctx.lineTo(cxb + r * 0.09, ay + r * 0.62);
+    }
     ctx.stroke();
-    /* Tracking barrel */
-    const bx = castle.x + Math.cos(castle.angle) * r * 0.3;
-    const by = castle.y + Math.sin(castle.angle) * r * 0.3;
-    const mx = castle.x + Math.cos(castle.angle) * r * 1.35;
-    const my = castle.y + Math.sin(castle.angle) * r * 1.35;
-    const perp = castle.angle + Math.PI / 2;
-    const bw = r * 0.16;
+
+    /* ── ribbed command dome with hot core lamp ── */
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.moveTo(bx + Math.cos(perp) * bw, by + Math.sin(perp) * bw);
-    ctx.lineTo(mx + Math.cos(perp) * bw, my + Math.sin(perp) * bw);
-    ctx.lineTo(mx - Math.cos(perp) * bw, my - Math.sin(perp) * bw);
-    ctx.lineTo(bx - Math.cos(perp) * bw, by - Math.sin(perp) * bw);
+    ctx.arc(ax, ay + r * 0.06, r * 0.52, Math.PI, 0);
     ctx.stroke();
-    /* Lock indicator: small chevron when locked */
-    if (castle.locked && castle.alive) {
-      ctx.globalAlpha = 0.7;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.arc(ax, ay + r * 0.06, r * 0.34, Math.PI, 0);
+    ctx.moveTo(ax, ay - r * 0.46); ctx.lineTo(ax, ay + r * 0.06);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    /* dome lamp */
+    glow("#ffffff", 14);
+    ctx.fillStyle = "#dff4ff";
+    ctx.beginPath();
+    ctx.arc(ax, ay - r * 0.46, Math.max(1.4, r * 0.1), 0, Math.PI * 2);
+    ctx.fill();
+
+    /* ── TRIKE barrel cluster: one spine + two flanking barrels,
+       all tracking; side barrels glow charged as lock approaches ── */
+    const barrelAngles = [castle.angle - 0.34, castle.angle, castle.angle + 0.34];
+    const lens = [r * 1.18, r * 1.5, r * 1.18];
+    for (let bIdx = 0; bIdx < 3; bIdx++) {
+      const ba = barrelAngles[bIdx];
+      const bp = ba + Math.PI / 2;
+      const bw = bIdx === 1 ? r * 0.17 : r * 0.11;
+      const bsx = ax + Math.cos(ba) * r * 0.32, bsy = ay + Math.sin(ba) * r * 0.32;
+      const bmx = ax + Math.cos(ba) * lens[bIdx], bmy = ay + Math.sin(ba) * lens[bIdx];
+      glow(CORE_COLOR, bIdx === 1 ? 12 : 8);
+      ctx.lineWidth = bIdx === 1 ? 1.8 : 1.3;
       ctx.beginPath();
-      ctx.arc(mx, my, r * 0.22, castle.angle - 0.7, castle.angle + 0.7);
+      ctx.moveTo(bsx + Math.cos(bp) * bw, bsy + Math.sin(bp) * bw);
+      ctx.lineTo(bmx + Math.cos(bp) * bw, bmy + Math.sin(bp) * bw);
+      ctx.lineTo(bmx - Math.cos(bp) * bw, bmy - Math.sin(bp) * bw);
+      ctx.lineTo(bsx - Math.cos(bp) * bw, bsy - Math.sin(bp) * bw);
+      ctx.closePath();
       ctx.stroke();
+      /* muzzle energy ring — brighter when the cannon is locked */
+      const muzzleA = castle.locked ? 0.9 : 0.4;
+      ctx.globalAlpha = muzzleA;
+      glow(bIdx === 1 ? "#ffffff" : CORE_COLOR, 10);
+      ctx.beginPath();
+      ctx.arc(bmx, bmy, Math.max(1.6, bw * 0.9), ba - 1.25, ba + 1.25);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    /* barrel manifold tie-bar */
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    ctx.arc(ax, ay, r * 0.5, castle.angle - 0.5, castle.angle + 0.5);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    /* ── lock indicator: triple chevron burst when locked ── */
+    if (castle.locked && castle.alive) {
+      ctx.globalAlpha = 0.75;
+      const lm = ax + Math.cos(castle.angle) * r * 1.5;
+      const lmy = ay + Math.sin(castle.angle) * r * 1.5;
+      for (let k = 1; k <= 3; k++) {
+        ctx.beginPath();
+        ctx.arc(lm, lmy, r * (0.18 + k * 0.09), castle.angle - 0.55, castle.angle + 0.55);
+        ctx.stroke();
+      }
       ctx.globalAlpha = 1;
     }
     noGlow();
@@ -1412,28 +1502,45 @@
         arcSeg(W / 2, H / 2, R, rot + si * seg, rot + si * seg + seg * 0.8);
       }
     }
-    /* castle silhouette */
+    /* castle silhouette: triple-barrel cluster */
     ctx.translate(W / 2, H / 2);
     ctx.rotate(demoT * 0.01);
     const r = coreRadius();
     glow(CORE_COLOR, 10);
-    ctx.lineWidth = 1.6;
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(-r, r * 0.55); ctx.lineTo(-r * 0.55, -r * 0.1);
     ctx.lineTo(r * 0.55, -r * 0.1); ctx.lineTo(r, r * 0.55);
     ctx.stroke();
     ctx.beginPath(); ctx.arc(0, -r * 0.1, r * 0.42, Math.PI, 0); ctx.stroke();
+    for (let bIdx = -1; bIdx <= 1; bIdx++) {
+      const ba = -Math.PI / 2 + bIdx * 0.34;
+      const bl = bIdx === 0 ? r * 1.5 : r * 1.18;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(ba) * bl, Math.sin(ba) * bl);
+      ctx.stroke();
+    }
     ctx.restore();
-    /* orbiting mines */
-    glow(CORE_COLOR, 8);
-    ctx.lineWidth = 1.4;
+    /* orbiting spark mines */
     for (let i = 0; i < 3; i++) {
       const a = demoT * 0.02 + (i * Math.PI * 2) / 3;
       const rr = S * 0.19 * 1.55;
       const mx = W / 2 + Math.cos(a) * rr, my = H / 2 + Math.sin(a) * rr;
+      glowThick("#ffe9a0", 1.4, 12);
       ctx.beginPath();
-      ctx.moveTo(mx, my - 5); ctx.lineTo(mx + 5, my); ctx.lineTo(mx, my + 5); ctx.lineTo(mx - 5, my);
-      ctx.closePath(); ctx.stroke();
+      ctx.moveTo(mx, my);
+      ctx.lineTo(mx - Math.cos(a) * 14, my - Math.sin(a) * 14);
+      ctx.stroke();
+      glowThick("#ffffff", 1.3, 14);
+      const seed = Math.floor(demoT * 0.5) + i * 5;
+      ctx.beginPath();
+      for (let k = 0; k < 3; k++) {
+        const sa = a + Math.sin(seed * 1.9 + k * 2.2) * 2.0 + k * 2.1;
+        ctx.moveTo(mx, my);
+        ctx.lineTo(mx + Math.cos(sa) * 6, my + Math.sin(sa) * 6);
+      }
+      ctx.stroke();
     }
     noGlow();
   }
@@ -1454,9 +1561,9 @@
       glowText("OBJECT OF THE GAME", cx, H * 0.18, fs, "#ffd80a", "center", 12);
       const lines = [
         "DESTROY THE STAR CASTLE",
-        "SECTIONS REQUIRE TWO HITS",
-        "RING REGENERATES WHEN OUTER",
-        "RING IS DESTROYED",
+        "INNER SHIELDS ARE TOUGHER",
+        "OUTER 5 / MIDDLE 6 / INNER 7 HP",
+        "SHIELDS REGENERATE SLOWLY",
         "MINES HAVE NO POINTS VALUE",
       ];
       lines.forEach(function(ln, i) {
@@ -1591,7 +1698,7 @@
   window._sparkCountForLevel = sparkCountForLevel;
   window._sparkFirstDelay = sparkFirstDelay;
   window._scores = { CASTLE: CASTLE_POINTS, SECTION: SECTION_POINTS };
-  window._consts = { SEGMENTS: RING_SEGMENTS, HITS: SECTION_HITS, MINES: MAX_MINES };
+  window._consts = { SEGMENTS: RING_SEGMENTS, HITS: SECTION_HP, MINES: MAX_MINES };
   window._ringRotSpeed = ringRotSpeed;
   window._mineSpeed = mineSpeed;
   window._cannonFireCooldown = cannonFireCooldown;
