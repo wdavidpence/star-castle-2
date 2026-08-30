@@ -26,6 +26,9 @@
        • The cannon tracks the player at all times and fires a large
          white-noise FUZZBALL whenever it has a clear line of fire
          (aligned gaps — and always, once the inner ring is down).
+       • The shields REGENERATE SLOWLY: destroyed sections bloom back
+         on their own over ~20s per section (faster at higher levels);
+         a freshly regenerated section has a brief harmless grace.
        • When the OUTERMOST ring is fully destroyed the shields
          regenerate: middle expands out, inner becomes middle, a brand
          new ring blooms at the core, and mines are restored.
@@ -415,7 +418,12 @@
     for (let i = 0; i < RING_SEGMENTS; i++) a.push(SECTION_HITS);
     return a;
   }
-  function freshRing(i) { return { rot: 0, sections: freshSections(), bloom: 0 }; }
+  function freshRing(i) { return { rot: 0, sections: freshSections(), bloom: 0, lastHit: freshTimes(), regen: freshTimes() }; }
+  function freshTimes() {
+    const a = [];
+    for (let k = 0; k < RING_SEGMENTS; k++) a.push(0);
+    return a;
+  }
 
   let rings = [freshRing(0), freshRing(1), freshRing(2)];
 
@@ -570,6 +578,8 @@
     const segIdx = sectionAt(ringIdx, absAngle);
     const ring = rings[ringIdx];
     if (ring.sections[segIdx] <= 0) return -1;
+    /* grace period: a freshly regenerated section blooms in harmlessly */
+    if (ring.regen[segIdx] > 0) return -1;
     /* Also reject near-gap cases: angle inside the swept section arc. */
     const seg = (Math.PI * 2) / RING_SEGMENTS;
     let a = absAngle - ring.rot;
@@ -581,12 +591,30 @@
     return ringIdx;
   }
 
-  /* ── Shield damage / regeneration ──────────────────────────────────── */
+  /* ── Shield damage / slow regeneration ─────────────────────────────── */
+  /* Original arcade behavior: destroyed shield sections slowly bloom
+     back over time, so gaps the player punched earlier heal shut. */
+  function shieldRegenEvery(lv) { return Math.max(900, 1200 - (lv - 1) * 40); } /* ~20s @lvl1 */
+  function updateShieldRegen() {
+    const every = shieldRegenEvery(level);
+    for (let ri = 0; ri < 3; ri++) {
+      const ring = rings[ri];
+      for (let si = 0; si < RING_SEGMENTS; si++) {
+        if (ring.sections[si] > 0 || ring.bloom > 0) continue;
+        if (levelFrames - ring.lastHit[si] >= every) {
+          ring.sections[si] = SECTION_HITS;
+          ring.regen[si] = REGEN_ANIM_FRAMES; /* slow bright bloom-in */
+        }
+      }
+    }
+  }
+
   function hitSection(ringIdx, segIdx) {
     const ring = rings[ringIdx];
     const before = ring.sections[segIdx];
     if (before <= 0) return;
     ring.sections[segIdx] = before - 1;
+    ring.lastHit[segIdx] = levelFrames;
     if (ring.sections[segIdx] === 1) {
       sfxRingHit();
       spawnSparks(ringIdx, segIdx, 4);
@@ -608,6 +636,8 @@
     for (let i = 2; i > 0; i--) {
       rings[i].sections = rings[i - 1].sections.slice();
       rings[i].rot = rings[i - 1].rot;
+      rings[i].lastHit = rings[i - 1].lastHit.slice();
+      rings[i].regen = rings[i - 1].regen.slice();
     }
     rings[0].sections = freshSections();
     rings[0].bloom = REGEN_ANIM_FRAMES;
@@ -845,6 +875,7 @@
   function startLevel(nextLevel) {
     level = nextLevel;
     levelFrames = 0; ramp = 0;
+    collapseFactor = 1;          /* re-inflate rings/castle after collapse */
     resetCastle();
     resetRings();
     resetMines();
@@ -879,6 +910,7 @@
 
   function startGame() {
     score = 0; lives = 3; level = 1; levelFrames = 0; ramp = 0;
+    collapseFactor = 1;
     particles.length = 0;
     resetPlayer(false);
     player.x = W / 2; player.y = H * 0.82;
@@ -944,6 +976,9 @@
     levelFrames++;
     ramp = Math.min(0.5, levelFrames * 0.00012);
 
+    /* Shields slowly regenerate destroyed sections */
+    updateShieldRegen();
+
     if (introTimer > 0) introTimer--;
 
     /* Rings rotate (opposite directions) */
@@ -953,6 +988,9 @@
       if (rings[i].rot > Math.PI * 2) rings[i].rot -= Math.PI * 2;
       if (rings[i].rot < 0) rings[i].rot += Math.PI * 2;
       if (rings[i].bloom > 0) rings[i].bloom--;
+      for (let k = 0; k < RING_SEGMENTS; k++) {
+        if (rings[i].regen[k] > 0) rings[i].regen[k]--;
+      }
     }
 
     /* Player physics */
@@ -1135,6 +1173,13 @@
           ctx.moveTo(castle.x + Math.cos(a) * (R - S * 0.008), castle.y + Math.sin(a) * (R - S * 0.008));
           ctx.lineTo(castle.x + Math.cos(a) * (R + S * 0.008), castle.y + Math.sin(a) * (R + S * 0.008));
           ctx.stroke();
+        }
+        /* slow bloom-in as the destroyed section regenerates */
+        if (ring.regen[si] > 0) {
+          const t = 1 - ring.regen[si] / REGEN_ANIM_FRAMES;
+          glowThick(color, Math.max(1, thickness * 0.7), 10);
+          ctx.globalAlpha = 0.15 + 0.7 * t;
+          arcSeg(castle.x, castle.y, R, a0, a0 + arcCover * t);
         }
         ctx.globalAlpha = 1;
         continue;
@@ -1534,6 +1579,7 @@
   window._level = function() { return level; };
   window._startGame = function() { startGame(); };
   window._step = function(n) { idleTimer = 0; for (let i = 0; i < (n || 1); i++) { update(); idleTimer = 0; } };
+  window._frame = function(n) { if (n === undefined) return attractFrame; attractFrame = n; };
   window._rayClear = rayClear;
   window._sectionAt = sectionAt;
   window._hitSection = hitSection;

@@ -182,9 +182,12 @@ function check(cond, msg) {
     const p = window._player;
     p.invincible = 99999; p.vx = 0; p.vy = 0;
     const c = window._castle;
-    // put ambusher mid-range so skirmish phases engage
+    // ambusher mid-range; deterministic phases: force a back-off phase
+    // first (sparkPhase chosen so phase 0 = back off at entry)
     m.x = c.x - 260; m.y = c.y; m.side = 1;
     p.x = c.x + 60; p.y = c.y;
+    window._frame(0);
+    m.sparkPhase = 0.1; /* floor(0*0.01+0.1)%3 === 0 -> back off */
     const d0 = Math.hypot(p.x - m.x, p.y - m.y);
     let maxD = d0, minD = d0;
     for (let i = 0; i < 700; i++) {
@@ -242,10 +245,22 @@ function check(cond, msg) {
 
   // collapse -> next level
   await page.waitForTimeout(2600);
-  const lvl = await page.evaluate(() => ({ state: window._state(), level: window._level(), rings: [window._ringLive(0), window._ringLive(1), window._ringLive(2)], spark: window._sparkState(), batt: window._sparkCountForLevel(window._level()) }));
+  const lvl = await page.evaluate(() => ({ state: window._state(), level: window._level(), rings: [window._ringLive(0), window._ringLive(1), window._ringLive(2)], spark: window._sparkState(), batt: window._sparkCountForLevel(window._level()), coreR: window._castle ? Math.min(1280,800)*0.052 : 0, ring0: window._ringRadius(0) }));
   check(lvl.level === 2, 'advances to level 2 after collapse');
   check(lvl.rings.every(n => n === 12), 'fresh rings on new level');
+  check(lvl.ring0 > 50, 'castle/rings visible on level 2 (collapseFactor re-inflated, R=' + lvl.ring0.toFixed(0) + ')');
   check(lvl.spark.scheduled === lvl.batt, 'level 2 reschedules its spark battery (' + lvl.spark.scheduled + '/' + lvl.batt + ')');
+
+  // slow shield regen: destroy one outer section, fast-forward, it blooms back
+  const regenSlow = await page.evaluate(() => {
+    window._hitSection(1, 5); window._hitSection(1, 5);
+    const dead = window._rings()[1].sections[5] === 0;
+    window._step(1240); /* regen cadence 1160 @lvl2 + grace margin */
+    const back = window._rings()[1].sections[5];
+    return { dead, back, grace: window._rings()[1].regen ? window._rings()[1].regen[5] : -1 };
+  });
+  check(regenSlow.dead, 'section destroy still works');
+  check(regenSlow.back === 2, 'destroyed shield section regenerates over time (health restored)');
 
   // player death -> dying state
   await page.evaluate(() => { window._hitPlayer(); });
